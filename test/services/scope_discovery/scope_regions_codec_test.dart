@@ -55,4 +55,25 @@ void main() {
     expect(parseRegionsReply(reply(n(33))), hasLength(33));
     expect(parseRegionsReply(reply(n(34))), isNull);
   });
+  test('leading byte order mark is preserved in first name', () {
+    const bom = '\u{FEFF}';
+    final d = Uint8List.fromList([0, 0, 0, 0, 0xEF, 0xBB, 0xBF, 0x59, 0x4F, 0x57]); // clock + BOM + YOW
+    expect(parseRegionsReply(d), ['$bom' 'YOW']);
+    expect(parseRegionsReply(d)![0].length, 4); // BOM (1 char) + YOW (3 chars)
+  });
+  test('BOM plus 28 ASCII letters (31 bytes) is malformed', () {
+    final d = Uint8List.fromList([0, 0, 0, 0, 0xEF, 0xBB, 0xBF, ...List.generate(28, (_) => 0x41)]); // clock + BOM + 28 A's
+    expect(parseRegionsReply(d), isNull);
+  });
+  test('BOM plus 27 ASCII letters (30 bytes) is accepted and preserved', () {
+    const bom = '\u{FEFF}';
+    final letters = List.generate(27, (_) => 0x41);
+    final d = Uint8List.fromList([0, 0, 0, 0, 0xEF, 0xBB, 0xBF, ...letters]); // clock + BOM + 27 A's
+    final result = parseRegionsReply(d);
+    expect(result, isNotNull);
+    if (result != null) {
+      expect(result[0].startsWith(bom), true);
+      expect(result[0].length, 28); // BOM (1 char) + 27 A's
+    }
+  });
 }
