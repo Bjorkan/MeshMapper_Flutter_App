@@ -1,13 +1,29 @@
 import 'dart:async';
 import 'dart:typed_data';
 
+import 'package:fake_async/fake_async.dart';
 import 'package:flutter/foundation.dart' show debugPrint;
 import 'package:flutter_test/flutter_test.dart';
 import 'package:mesh_mapper/services/meshcore/connection.dart';
 import 'package:mesh_mapper/services/meshcore/protocol_constants.dart';
 import 'package:mesh_mapper/utils/debug_logger_io.dart';
 
+import 'catalog_protocol_transport.dart';
 import 'fake_companion_transport.dart';
+
+/// Runs the real connect handshake, then answers a channel message the way
+/// the firmware does: a bare OK, here 5 ms after the write.
+class _OkAfterTxTransport extends CatalogProtocolTransport {
+  @override
+  Future<void> write(Uint8List data) async {
+    if (data.isNotEmpty && data.first == CommandCodes.sendChannelTxtMsg) {
+      writes.add(Uint8List.fromList(data));
+      Timer(const Duration(milliseconds: 5), () => emit([ResponseCodes.ok]));
+      return;
+    }
+    await super.write(data);
+  }
+}
 
 /// The companion firmware answers CMD_SEND_CHANNEL_TXT_MSG and
 /// CMD_SEND_CONTROL_DATA (discovery) with a bare OK or ERR, never with
@@ -59,30 +75,73 @@ void main() {
     return lines;
   }
 
-  test('a TX returns as soon as its own OK arrives, not after 3 s', () async {
+  /// Runs [body] on a controlled clock with a connection built inside it, so
+  /// every timer (the reply budget included) is fake and nothing is timed on
+  /// the wall clock.
+  void onFakeClock(
+      FakeCompanionTransport Function() makeTransport,
+      void Function(FakeAsync async, FakeCompanionTransport transport,
+              MeshCoreConnection connection)
+          body) {
+    fakeAsync((async) {
+      final fakeTransport = makeTransport();
+      final fakeConnection = MeshCoreConnection(transport: fakeTransport);
+      body(async, fakeTransport, fakeConnection);
+      fakeConnection.dispose();
+      fakeTransport.dispose();
+      async.flushMicrotasks();
+    });
+  }
+
+  test('sendPing on a connected radio returns 5 ms after its OK is sent',
+      () {
     final lines = captureLog();
-    final watch = Stopwatch()..start();
-    final future = sendTx();
-    await transport.settle();
-    expect(transport.commandAt(0), CommandCodes.sendChannelTxtMsg);
-    Timer(const Duration(milliseconds: 5),
-        () => transport.emit([ResponseCodes.ok]));
-    await future;
-    watch.stop();
-    expect(watch.elapsedMilliseconds, lessThan(500));
+    onFakeClock(_OkAfterTxTransport.new, (async, radio, conn) {
+      var connected = false;
+      conn.connect((_) async => null).then((_) => connected = true);
+      // connect() lets the link settle for 500 ms before its first query.
+      async.elapse(const Duration(seconds: 1));
+      expect(connected, isTrue);
+      expect(conn.wardrivingChannel?.name, '#wardriving');
+
+      var done = false;
+      conn.sendPing('MM:YVNPAr5OIw').then((_) => done = true);
+      async.flushMicrotasks();
+      expect(radio.writes.last.first, CommandCodes.sendChannelTxtMsg);
+
+      // The radio replies OK 5 ms after the write.
+      async.elapse(const Duration(milliseconds: 4));
+      expect(done, isFalse);
+      async.elapse(const Duration(milliseconds: 6));
+      expect(done, isTrue, reason: 'sendPing must finish within 10 ms');
+    });
     expect(lines.any((l) => l.contains('[CONN] OK claimed by TX send')),
         isTrue);
   });
 
-  test('a TX ERR returns at once and is logged as a warning', () async {
+  test('a TX returns as soon as its own OK arrives, not after 3 s', () {
+    onFakeClock(FakeCompanionTransport.new, (async, radio, conn) {
+      var done = false;
+      conn.sendChannelTextMessage(0, 1, 0, 'MM:x').then((_) => done = true);
+      async.flushMicrotasks();
+      expect(radio.commandAt(0), CommandCodes.sendChannelTxtMsg);
+      Timer(const Duration(milliseconds: 5),
+          () => radio.emit([ResponseCodes.ok]));
+      async.elapse(const Duration(milliseconds: 10));
+      expect(done, isTrue);
+    });
+  });
+
+  test('a TX ERR returns at once and is logged as a warning', () {
     final lines = captureLog();
-    final watch = Stopwatch()..start();
-    final future = sendTx();
-    await transport.settle();
-    transport.emit([ResponseCodes.err, ErrorCodes.notFound]);
-    await future;
-    watch.stop();
-    expect(watch.elapsedMilliseconds, lessThan(500));
+    onFakeClock(FakeCompanionTransport.new, (async, radio, conn) {
+      var done = false;
+      conn.sendChannelTextMessage(0, 1, 0, 'MM:x').then((_) => done = true);
+      async.flushMicrotasks();
+      radio.emit([ResponseCodes.err, ErrorCodes.notFound]);
+      async.flushMicrotasks();
+      expect(done, isTrue);
+    });
     expect(
         lines.any((l) =>
             l.contains('[CONN]') &&
@@ -91,19 +150,24 @@ void main() {
         isTrue);
   });
 
-  test('a TX with no reply returns after 3 s and releases its claim',
-      () async {
-    final watch = Stopwatch()..start();
-    await sendTx();
-    watch.stop();
-    expect(watch.elapsedMilliseconds, greaterThanOrEqualTo(2900));
+  test('a TX with no reply returns after 3 s and releases its claim', () {
+    onFakeClock(FakeCompanionTransport.new, (async, radio, conn) {
+      var done = false;
+      conn.sendChannelTextMessage(0, 1, 0, 'MM:x').then((_) => done = true);
+      async.elapse(const Duration(milliseconds: 2999));
+      expect(done, isFalse);
+      async.elapse(const Duration(milliseconds: 1));
+      expect(done, isTrue);
 
-    // The expired claim must not swallow the next command's OK.
-    final add = connection.addContact(contact());
-    await transport.settle();
-    transport.emit([ResponseCodes.ok]);
-    expect(await isDone(add), isTrue);
-  }, timeout: const Timeout(Duration(seconds: 10)));
+      // The expired claim must not swallow the next command's OK.
+      var added = false;
+      conn.addContact(contact()).then((_) => added = true);
+      async.flushMicrotasks();
+      radio.emit([ResponseCodes.ok]);
+      async.flushMicrotasks();
+      expect(added, isTrue);
+    });
+  });
 
   test('a TX OK goes to the TX and the admin OK to the admin', () async {
     final tx = sendTx();
