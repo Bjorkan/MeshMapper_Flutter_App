@@ -63,6 +63,8 @@ class CommandCodes {
   static const int sendRawData = 25;
   static const int sendLogin = 26;
   static const int sendStatusReq = 27;
+  /// CMD_GET_CONTACT_BY_KEY: [30][pubkey 32] -> RESP_CODE_CONTACT or ERR NOT_FOUND.
+  static const int getContactByKey = 30;
   static const int getChannel = 31;
   static const int setChannel = 32;
   static const int signStart = 33;
@@ -75,8 +77,19 @@ class CommandCodes {
   static const int sendTelemetryReq = 39;
   static const int setFloodScope = 54; // 0x36 - CMD_SET_FLOOD_SCOPE
   static const int getStats = 56; // 0x38
+  /// CMD_SEND_ANON_REQ: [57][pubkey 32][request]. Non-contact targets need
+  /// firmware code 13+. Answered by PUSH_CODE_BINARY_RESPONSE (0x8C).
+  static const int sendAnonReq = 57;
   static const int sendBinaryReq = 50;
   static const int setPathHashMode = 61; // 0x3D - CMD_SET_PATH_HASH_MODE
+}
+
+/// Anonymous request types for CMD_SEND_ANON_REQ
+class AnonRequestTypes {
+  AnonRequestTypes._();
+
+  /// Repeater regions (scope list) request. Direct route only on the repeater.
+  static const int regions = 0x01;
 }
 
 /// Response codes received from device
