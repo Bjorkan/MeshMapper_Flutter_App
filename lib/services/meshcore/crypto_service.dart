@@ -75,14 +75,14 @@ class CryptoService {
   /// Same algorithm as channel key derivation: SHA-256(name)[0:16]
   /// API returns names without '#' prefix (e.g., "ottawa") — we prepend it
   /// to match MeshCore's implicit hashtag region convention
+  /// Scope names are case-sensitive and must match the region configuration exactly
   static Uint8List deriveScopeKey(String scopeName) {
     final name = scopeName.startsWith('#') ? scopeName : '#$scopeName';
-    final normalizedName = name.toLowerCase();
-    final bytes = utf8.encode(normalizedName);
+    final bytes = utf8.encode(name);
     final digest = sha256.convert(bytes);
     final scopeKey = Uint8List.fromList(digest.bytes.sublist(0, 16));
     debugLog(
-        '[CRYPTO] Scope key derived for "$normalizedName" (${scopeKey.length} bytes)');
+        '[CRYPTO] Scope key derived for "$name" (${scopeKey.length} bytes)');
     return scopeKey;
   }
 
