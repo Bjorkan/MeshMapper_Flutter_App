@@ -4,6 +4,7 @@ import 'dart:math';
 import '../../utils/debug_logger_io.dart';
 import 'packet_metadata.dart';
 import 'packet_validator.dart';
+import 'protocol_constants.dart';
 
 /// Passive RX logger for continuous wardriving observations
 /// Reference: handleRxLogging() + handleRxBatching() in wardrive.js (lines 3812-4140)
@@ -89,6 +90,18 @@ class RxLogger {
       if (metadata.pathHashCount == 0) {
         debugLog(
             '[RX LOG] Ignoring: no path (direct transmission, not via repeater)');
+        return false;
+      }
+
+      // A direct packet's path is the route it still has to travel (each
+      // repeater removes itself as it forwards), not the hops it came
+      // through, so its last hop is not who we heard. Crediting or blaming
+      // it named a repeater kilometres away as a carpeater when a nearby
+      // radio sent a login request routed through it.
+      if (metadata.routeType == RouteType.direct ||
+          metadata.routeType == RouteType.reserved2) {
+        debugLog(
+            '[RX LOG] Ignoring: direct-routed packet (path is its remaining route)');
         return false;
       }
 
