@@ -470,12 +470,14 @@ void main() {
   });
 
   group('SENT', () {
-    test('a 10-byte SENT still completes the legacy send completer', () async {
+    test('a stray SENT is harmless and a channel send completes on its OK',
+        () async {
       final future = connection.sendChannelTextMessage(0, 1, 0, 'hi');
       await transport.settle();
       transport.emit(
           [ResponseCodes.sent, 1, 0xDE, 0xAD, 0xBE, 0xEF, 0x10, 0x27, 0, 0]);
-      await future;
+      transport.emit([ResponseCodes.ok]);
+      await future.timeout(const Duration(seconds: 1));
     });
   });
 

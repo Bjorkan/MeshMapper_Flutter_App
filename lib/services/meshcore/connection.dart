@@ -2,6 +2,8 @@ import 'dart:async';
 import 'dart:math';
 import 'dart:typed_data';
 
+import 'package:flutter/foundation.dart' show visibleForTesting;
+
 import '../../models/connection_state.dart';
 import '../../models/device_model.dart';
 import '../../utils/debug_logger_io.dart';
@@ -167,6 +169,29 @@ class _AdminCommandToken {
   final String name;
 
   const _AdminCommandToken(this.name);
+}
+
+/// A send whose own bare OK or ERR the connection claims.
+enum _OwnReplyKind { tx, discovery }
+
+/// One pending claim on the next OK or ERR, queued as its frame goes out.
+class _OwnReplyClaim {
+  final _OwnReplyKind kind;
+
+  /// Completes when the reply arrives, the claim expires, or it is released.
+  final Completer<void> reply = Completer<void>();
+  Timer? expiry;
+
+  _OwnReplyClaim(this.kind);
+
+  String get label =>
+      kind == _OwnReplyKind.tx ? 'TX send' : 'discovery request';
+
+  void settle() {
+    expiry?.cancel();
+    expiry = null;
+    if (!reply.isCompleted) reply.complete();
+  }
 }
 
 /// The parsed RESP_CODE_SENT frame: [flood:1][tag:4][est_timeout_ms:u32].
@@ -411,12 +436,24 @@ class MeshCoreConnection {
   // Completers for command responses
   Completer<DeviceQueryResponse>? _deviceQueryCompleter;
   Completer<SelfInfo>? _selfInfoCompleter;
-  Completer<void>? _sentCompleter;
   Completer<void>? _setTimeCompleter;
   Completer<ChannelInfo>? _channelInfoCompleter;
   Completer<int>? _statsCompleter;
   Completer<String>? _exportContactCompleter;
   Completer<int>? _getTimeCompleter;
+
+  // TX pings and discovery requests are answered with a bare OK or ERR (never
+  // RESP_CODE_SENT), in command order. Each send queues a claim as its frame
+  // reaches the wire, and the oldest claim takes the next OK or ERR: after a
+  // pending sign, before the repeater-admin and time-sync owners. Without the
+  // claim that reply went to whichever OK waiter happened to exist.
+  final List<_OwnReplyClaim> _ownReplyClaims = [];
+
+  /// How long a TX or discovery claim waits for its OK or ERR before it
+  /// expires, so an unanswered send cannot swallow a later command's reply.
+  /// Tests shorten it.
+  @visibleForTesting
+  Duration ownReplyTimeout = const Duration(seconds: 3);
 
   // Repeater-admin commands (contacts, login, binary request, reset path).
   // One at a time: the companion keeps a single pending request and a login
@@ -740,6 +777,7 @@ class MeshCoreConnection {
       debugLog('[CONN] Disconnecting');
       _abortPendingSign();
       _abortPendingAdmin();
+      _releaseOwnReplies();
 
       // Stop noise floor polling
       _stopNoiseFloorPolling();
@@ -805,6 +843,7 @@ class MeshCoreConnection {
               if (!signOk.isCompleted) signOk.complete();
               break;
             }
+            if (_claimOwnReply(null)) break;
             final adminOk = _adminOkCompleter;
             if (adminOk != null) {
               final owner = _adminOkOwner;
@@ -853,6 +892,7 @@ class MeshCoreConnection {
           )) {
             break;
           }
+          if (_claimOwnReply(errorCode)) break;
           // Time sync: error code 6 (ERR_CODE_ILLEGAL_ARG) means "no sync needed" — treat as success
           if (_setTimeCompleter != null) {
             if (errorCode == 6) {
@@ -1372,8 +1412,9 @@ class MeshCoreConnection {
     }
   }
 
-  /// RESP_CODE_SENT. The legacy completer (channel messages) is void; the
-  /// repeater-admin completer wants the parsed [flood:1][tag:4][est:u32].
+  /// RESP_CODE_SENT. The repeater-admin completer wants the parsed
+  /// [flood:1][tag:4][est:u32]. Channel messages are answered with OK or ERR
+  /// instead (see [_claimOwnReply]).
   void _onSentResponse(BufferReader reader) {
     SentInfo? info;
     if (reader.remainingBytesCount >= 9) {
@@ -1382,8 +1423,6 @@ class MeshCoreConnection {
       final est = reader.readUInt32LE();
       info = SentInfo(flood: flood, tag: tag, estTimeoutMs: est);
     }
-    _sentCompleter?.complete();
-    _sentCompleter = null;
     final admin = _adminSentCompleter;
     _adminSentCompleter = null;
     if (admin != null && !admin.isCompleted) {
@@ -1648,8 +1687,10 @@ class MeshCoreConnection {
   /// setFloodScope, setChannel, setPathHashMode, setAdvertName and setTxPower —
   /// letting one of those onto the wire mid-sign means its OK is consumed as
   /// the chunk ack and the handshake desynchronises. Sign's own frames pass
-  /// [isSignFrame] and bypass the gate.
-  Future<void> _write(Uint8List bytes, {bool isSignFrame = false}) async {
+  /// [isSignFrame] and bypass the gate. [onWire] runs synchronously just
+  /// before the frame is handed to the transport, after any gate wait.
+  Future<void> _write(Uint8List bytes,
+      {bool isSignFrame = false, void Function()? onWire}) async {
     if (!isSignFrame) {
       final gate = _signGate;
       if (gate != null && !gate.isCompleted) {
@@ -1660,7 +1701,66 @@ class MeshCoreConnection {
         await gate.future;
       }
     }
+    onWire?.call();
     await _transport.write(bytes);
+  }
+
+  /// Queues a claim on the next OK or ERR for a send about to hit the wire.
+  _OwnReplyClaim _armOwnReply(_OwnReplyKind kind) {
+    final claim = _OwnReplyClaim(kind);
+    claim.expiry = Timer(ownReplyTimeout, () {
+      if (_ownReplyClaims.remove(claim)) {
+        debugWarn('[CONN] No reply to ${claim.label} within '
+            '${ownReplyTimeout.inMilliseconds}ms');
+      }
+      claim.settle();
+    });
+    _ownReplyClaims.add(claim);
+    return claim;
+  }
+
+  /// Sends [data] with a claim on its own OK or ERR. The claim is dropped
+  /// again when the write itself fails.
+  Future<_OwnReplyClaim> _sendClaimingReply(
+      BufferWriter data, _OwnReplyKind kind) async {
+    _OwnReplyClaim? claim;
+    try {
+      await _write(data.toBytes(), onWire: () => claim = _armOwnReply(kind));
+    } catch (_) {
+      final armed = claim;
+      if (armed != null) {
+        _ownReplyClaims.remove(armed);
+        armed.settle();
+      }
+      rethrow;
+    }
+    return claim!;
+  }
+
+  /// Hands an OK ([errorCode] null) or an ERR to the oldest pending TX or
+  /// discovery claim. Returns false when no claim is pending.
+  bool _claimOwnReply(int? errorCode) {
+    if (_ownReplyClaims.isEmpty) return false;
+    final claim = _ownReplyClaims.removeAt(0);
+    claim.settle();
+    if (errorCode == null) {
+      debugLog('[CONN] OK claimed by ${claim.label}');
+    } else {
+      // Logged only: the send's return and the ping flow are unchanged.
+      debugWarn('[CONN] ${claim.kind == _OwnReplyKind.tx ? 'TX send' : 'Discovery request'} '
+          'rejected by radio (error code $errorCode)');
+    }
+    return true;
+  }
+
+  /// Settles every pending TX or discovery claim, so no send is left waiting
+  /// on a link that is going away.
+  void _releaseOwnReplies() {
+    final claims = List<_OwnReplyClaim>.of(_ownReplyClaims);
+    _ownReplyClaims.clear();
+    for (final claim in claims) {
+      claim.settle();
+    }
   }
 
   /// Write frame to device
@@ -1916,26 +2016,18 @@ class MeshCoreConnection {
   /// Reference: sendCommandSendChannelTxtMsg in connection.js
   Future<void> sendChannelTextMessage(
       int txtType, int channelIdx, int senderTimestamp, String text) async {
-    _sentCompleter = Completer<void>();
-
-    // Save reference to future BEFORE sending command to avoid race condition
-    final future = _sentCompleter!.future;
-
     final data = BufferWriter();
     data.writeByte(CommandCodes.sendChannelTxtMsg);
     data.writeByte(txtType);
     data.writeByte(channelIdx);
     data.writeUInt32LE(senderTimestamp);
     data.writeString(text);
-    await _sendToRadio(data);
 
-    // Wait for sent confirmation (with timeout)
-    await future.timeout(
-      const Duration(seconds: 3),
-      onTimeout: () {
-        // Ignore timeout - message may still be sent
-      },
-    );
+    // The firmware answers with OK, or ERR on a bad channel index, never with
+    // RESP_CODE_SENT. Wait for that reply (normally a few milliseconds); the
+    // claim gives up after [ownReplyTimeout], as the message may still be sent.
+    final claim = await _sendClaimingReply(data, _OwnReplyKind.tx);
+    await claim.reply.future;
   }
 
   /// Send a pre-composed TX body to the #wardriving channel.
@@ -1987,7 +2079,9 @@ class MeshCoreConnection {
         DiscoveryConstants.typeFilterRepeaterRoom); // 0x0C = REPEATER | ROOM
     data.writeBytes(tag); // 4-byte random tag
     data.writeUInt32LE(0); // timestamp = 0 (discover all)
-    await _sendToRadio(data);
+    // Claim the OK or ERR so it cannot complete another command's waiter.
+    // Nothing waits on it.
+    await _sendClaimingReply(data, _OwnReplyKind.discovery);
 
     return tag;
   }
@@ -2622,6 +2716,7 @@ class MeshCoreConnection {
     _stopBatteryPolling();
     _abortPendingSign();
     _abortPendingAdmin();
+    _releaseOwnReplies();
     _setTimeCompleter = null;
     _dataSubscription?.cancel();
     _stepController.close();
