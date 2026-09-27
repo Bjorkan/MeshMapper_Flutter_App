@@ -247,7 +247,7 @@ class DiscoveredNode {
   final int localRssi; // RSSI as seen by local device (dBm)
   final double remoteSnr; // SNR as seen by remote node (dB)
   final String
-      pubkeyFull; // Full 32-byte public key as hex (local only, not sent to API)
+      pubkeyFull; // Full 32-byte public key as hex (sent to the API as public_key on the DISC item)
 
   DiscoveredNode({
     required this.repeaterId,

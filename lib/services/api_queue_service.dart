@@ -9,6 +9,105 @@ import 'api_service.dart';
 import 'custom_api_service.dart';
 import 'network_state_service.dart';
 
+/// Extracts the public key a DISC item reports, or null when the item is
+/// not a successful DISC (a failed discovery's heardRepeats is `'None'`, and
+/// nothing else carries this shape). Used to line a SCOPES item up with the
+/// DISC that must precede it.
+String? _discKeyOf(ApiQueueItem item) {
+  if (item.type != 'DISC' || item.heardRepeats == 'None') return null;
+  // "repeaterId:nodeType:localSnr:localRssi:remoteSnr:pubkeyFull"
+  final parts = item.heardRepeats.split(':');
+  if (parts.length < 6 || parts[5].isEmpty) return null;
+  return parts[5].toUpperCase();
+}
+
+/// Selects which eligible items belong in the next batch, holding a SCOPES
+/// item back until its DISC has either already left in an earlier batch (no
+/// longer anywhere in the queue) or rides along in this same batch.
+///
+/// The server records every DISC-heard key of a batch before it checks any
+/// SCOPES in it, but refuses a SCOPES whose DISC only arrives LATER, so a
+/// SCOPES item must never be uploaded ahead of the DISC it depends on.
+///
+/// [eligible] is every item ready for this batch, in the existing order
+/// (retry eligibility, Hive before memory). [allQueued] is every item
+/// currently held, Hive and memory alike, regardless of retry eligibility:
+/// a DISC sitting in retry backoff still counts as "not yet delivered", so
+/// its SCOPES must wait for it even though the DISC itself is not eligible
+/// for this batch.
+///
+/// Non-SCOPES items are selected first, up to [batchSize], so a run of
+/// blocked SCOPES at the head of the queue can never crowd out the DISC
+/// items behind them; a held-back SCOPES never occupies a slot.
+List<ApiQueueItem> selectBatchWithScopesDependency({
+  required List<ApiQueueItem> eligible,
+  required List<ApiQueueItem> allQueued,
+  required int batchSize,
+}) {
+  final discKeysAnywhere = <String>{};
+  for (final item in allQueued) {
+    final key = _discKeyOf(item);
+    if (key != null) discKeysAnywhere.add(key);
+  }
+
+  final nonScopes = <ApiQueueItem>[];
+  final scopesCandidates = <ApiQueueItem>[];
+  for (final item in eligible) {
+    if (item.type == 'SCOPES') {
+      scopesCandidates.add(item);
+    } else {
+      nonScopes.add(item);
+    }
+  }
+
+  final selected = nonScopes.take(batchSize).toList();
+
+  final selectedDiscKeys = <String>{};
+  for (final item in selected) {
+    final key = _discKeyOf(item);
+    if (key != null) selectedDiscKeys.add(key);
+  }
+
+  var remaining = batchSize - selected.length;
+  if (remaining > 0) {
+    for (final scopeItem in scopesCandidates) {
+      if (remaining <= 0) break;
+      final key = scopeItem.heardRepeats.toUpperCase();
+      final discAlreadyDelivered = !discKeysAnywhere.contains(key);
+      if (selectedDiscKeys.contains(key) || discAlreadyDelivered) {
+        selected.add(scopeItem);
+        remaining--;
+      }
+    }
+  }
+
+  return selected;
+}
+
+/// Stable-partitions API JSON rows so every SCOPES row comes after every
+/// other row, preserving relative order within each group. The server
+/// records a batch or offline chunk's DISC-heard keys before it checks any
+/// SCOPES in it, but refuses a SCOPES whose DISC only arrives in a LATER
+/// batch or chunk, so every export and every chunk boundary must keep DISC
+/// (and everything else) ahead of SCOPES, whatever order the rows were
+/// recorded or stored in.
+List<Map<String, dynamic>> orderDiscBeforeScopes(
+    List<Map<String, dynamic>> rows) {
+  final others = rows.where((r) => r['type'] != 'SCOPES').toList();
+  final scopes = rows.where((r) => r['type'] == 'SCOPES').toList();
+  return [...others, ...scopes];
+}
+
+/// Removes every SCOPES row from a list of API JSON rows, preserving the
+/// order of everything else. Used before an offline upload when the auth
+/// answer did not offer scope discovery: the server would refuse every one
+/// of them, so they are stripped before the partial-upload cleanup counts
+/// rows by how many were actually uploaded.
+List<Map<String, dynamic>> withoutScopesItems(
+    List<Map<String, dynamic>> rows) {
+  return rows.where((r) => r['type'] != 'SCOPES').toList();
+}
+
 /// API queue service with batch upload and retry logic
 /// Ported from apiQueue and batchUpload() in wardrive.js
 ///
@@ -60,6 +159,18 @@ class ApiQueueService {
   // RX buffer for grouping by repeater
   final Map<String, List<ApiQueueItem>> _rxBuffer = {};
 
+  /// Bumped every time the queue is cleared on disconnect
+  /// ([clearOnDisconnect]). A scope discovery answer's send and its enqueue
+  /// are separated by a mesh round trip, so the queue can be cleared out
+  /// from under a call that is still in flight; the caller reads this before
+  /// starting and passes it back so a late insertion can tell whether the
+  /// queue it was aimed at still exists.
+  int _generation = 0;
+
+  /// The current queue generation. Read before a scope answer's send, then
+  /// passed back to [enqueueScopes] as `expectedGeneration`.
+  int get generation => _generation;
+
   /// Callback for queue updates
   void Function(int queueSize)? onQueueUpdated;
 
@@ -92,6 +203,12 @@ class ApiQueueService {
   /// the provider wires the connection's SelfInfo here, never a remembered
   /// value.
   String? Function()? radioConfigGetter;
+
+  /// Whether the region has offered scope discovery, wired to
+  /// `ApiService.scopeDiscoveryOffered`. Null (not wired) is read as
+  /// allowed; the batch builder drops every queued SCOPES item the moment
+  /// this returns `false`, whatever the queue holds.
+  bool Function()? scopesAllowedGetter;
 
   /// Number of pings accumulated in current offline session
   int get offlinePingCount => _offlinePings.length;
@@ -586,6 +703,114 @@ class ApiQueueService {
     _schedulePingFlush();
   }
 
+  /// Queue a repeater's scope discovery answer. The public key rides in the
+  /// heardRepeats slot, the DISC/DEFER packing precedent, with the answer
+  /// itself in [ApiQueueItem.scopes]. Modelled on [enqueueDefer]: offline
+  /// rows honour the airborne pause, a closed box falls back to memory, and
+  /// the network-aware flush timer sends it on.
+  ///
+  /// A scope answer's send and its enqueue are separated by a mesh round
+  /// trip, during which a disconnect can clear the queue out from under it.
+  /// [expectedGeneration] (read from [generation] before the send started)
+  /// is checked immediately before every write attempt this call makes,
+  /// including a Hive recovery retry and the memory-fallback insertion. A
+  /// mismatch at any of those points returns false and leaves nothing
+  /// inserted, undoing a write that already landed rather than resurrecting
+  /// an item into a queue that no longer exists.
+  Future<bool> enqueueScopes({
+    required String publicKeyHex,
+    required List<String> scopes,
+    required double lat,
+    required double lon,
+    required int timestamp,
+    required int expectedGeneration,
+  }) async {
+    if (!lat.isFinite || !lon.isFinite) {
+      debugWarn('[API QUEUE] SCOPES dropped: non-finite lat/lon');
+      return false;
+    }
+
+    final item = ApiQueueItem.fromScopes(
+      publicKeyHex: publicKeyHex,
+      scopes: scopes,
+      lat: lat,
+      lon: lon,
+      timestamp: timestamp,
+      radioFreq: radioConfigGetter?.call(),
+    );
+
+    // In offline mode, accumulate to offline pings list instead of queue
+    if (offlineMode) {
+      if (_dropOfflineRowIfPaused()) return false;
+      if (expectedGeneration != _generation) {
+        debugWarn(
+            '[API QUEUE] SCOPES dropped: queue generation changed (queue was cleared)');
+        return false;
+      }
+      _offlinePings.add(item.toApiJson());
+      debugLog('[API QUEUE] SCOPES enqueued (offline)');
+      return true;
+    }
+
+    if (expectedGeneration != _generation) {
+      debugWarn(
+          '[API QUEUE] SCOPES dropped: queue generation changed before write (queue was cleared)');
+      return false;
+    }
+
+    final box = _box;
+    var wrote = false;
+    if (box != null) {
+      try {
+        await box.add(item);
+        wrote = true;
+      } catch (e) {
+        debugError(
+            '[API QUEUE] SCOPES write failed: $e - attempting recovery');
+        await _recoverBox();
+        if (expectedGeneration != _generation) {
+          debugWarn(
+              '[API QUEUE] SCOPES dropped: queue generation changed during recovery (queue was cleared)');
+          return false;
+        }
+        final retryBox = _box;
+        if (retryBox != null) {
+          try {
+            await retryBox.add(item);
+            wrote = true;
+          } catch (e2) {
+            debugError('[API QUEUE] SCOPES write failed after recovery: $e2');
+          }
+        }
+      }
+    }
+
+    if (expectedGeneration != _generation) {
+      // The clear that bumped the generation may have run while the write
+      // above (or its recovery) was in flight. Whatever landed belongs to a
+      // queue that no longer exists, so undo it rather than leave it queued.
+      if (wrote) {
+        try {
+          await item.delete();
+        } catch (_) {}
+      }
+      debugWarn(
+          '[API QUEUE] SCOPES dropped: queue generation changed during write (queue was cleared)');
+      return false;
+    }
+
+    if (!wrote) {
+      _memoryQueue.add(item);
+      debugLog(
+          '[API QUEUE] SCOPES enqueued (memory fallback) (queue size: $queueSize)');
+    } else {
+      debugLog('[API QUEUE] SCOPES enqueued (queue size: $queueSize)');
+    }
+    onQueueUpdated?.call(queueSize);
+    _schedulePingFlush();
+    return true;
+  }
+
   // Guard to prevent concurrent RX buffer flushes
   bool _isFlushing = false;
 
@@ -678,6 +903,36 @@ class ApiQueueService {
     await _uploadBatch();
   }
 
+  /// Removes every queued SCOPES item when the region has not offered scope
+  /// discovery (the key was absent from the live /auth answer). Called at
+  /// the top of every upload attempt so a queue built before the app learned
+  /// this never tries to send rows the server will refuse.
+  Future<void> _dropDisallowedScopesItems() async {
+    if (scopesAllowedGetter?.call() != false) return;
+
+    final hiveScopes = _safeRead(
+      (box) => box.values.where((i) => i.type == 'SCOPES').toList(),
+      <ApiQueueItem>[],
+    );
+    for (final item in hiveScopes) {
+      try {
+        await item.delete();
+      } catch (e) {
+        debugError('[API QUEUE] Failed to drop disallowed SCOPES item: $e');
+      }
+    }
+
+    final beforeMemory = _memoryQueue.length;
+    _memoryQueue.removeWhere((i) => i.type == 'SCOPES');
+    final dropped = hiveScopes.length + (beforeMemory - _memoryQueue.length);
+
+    if (dropped > 0) {
+      debugWarn(
+          '[API QUEUE] Dropped $dropped SCOPES item(s): scope discovery not offered');
+      onQueueUpdated?.call(queueSize);
+    }
+  }
+
   /// Upload batch of queued items (from Hive box or in-memory fallback)
   ///
   /// [silentWhenEmpty] suppresses the empty-queue line for callers that
@@ -689,6 +944,8 @@ class ApiQueueService {
       debugLog('[API QUEUE] Upload skipped: already uploading');
       return;
     }
+
+    await _dropDisallowedScopesItems();
 
     final hiveEmpty = _safeRead((box) => box.isEmpty, true);
     final memoryEmpty = _memoryQueue.isEmpty;
@@ -703,32 +960,50 @@ class ApiQueueService {
     _isUploading = true;
 
     try {
-      // Collect items from both Hive and memory queue
-      final hiveItems = _safeRead(
+      // Collect every eligible item from both Hive and memory queue, in the
+      // existing order (Hive before memory), uncapped: the SCOPES dependency
+      // filter below decides what fills the batch, not this read, or a run
+      // of blocked SCOPES at the head of the queue could crowd out the
+      // non-SCOPES items behind them.
+      final eligibleHive = _safeRead(
           (box) => box.values
               .where((item) =>
                   item.retryCount < _maxRetries &&
                   item.isReadyForRetry &&
                   item.isUploadEligible)
-              .take(_batchSize)
               .toList(),
           <ApiQueueItem>[]);
 
-      final memoryItems = _memoryQueue
+      final eligibleMemory = _memoryQueue
           .where((item) =>
               item.retryCount < _maxRetries &&
               item.isReadyForRetry &&
               item.isUploadEligible)
-          .take(_batchSize - hiveItems.length)
           .toList();
 
-      final items = [...hiveItems, ...memoryItems];
+      // Every item currently held, regardless of retry eligibility: a DISC
+      // still climbing the retry ladder has not been delivered, so its
+      // SCOPES must wait for it even though the DISC itself is not eligible
+      // for this batch.
+      final allQueued = [
+        ..._safeRead((box) => box.values.toList(), <ApiQueueItem>[]),
+        ..._memoryQueue,
+      ];
+
+      final items = selectBatchWithScopesDependency(
+        eligible: [...eligibleHive, ...eligibleMemory],
+        allQueued: allQueued,
+        batchSize: _batchSize,
+      );
 
       if (items.isEmpty) {
         debugLog('[API QUEUE] Upload skipped: no items ready for upload');
         _isUploading = false;
         return;
       }
+
+      final hiveItems = items.where((item) => item.isInBox).toList();
+      final memoryItems = items.where((item) => !item.isInBox).toList();
 
       // Convert to API format
       final pings = items.map((item) => item.toApiJson()).toList();
@@ -848,6 +1123,13 @@ class ApiQueueService {
   /// Called when device disconnects to ensure no stale pings remain
   /// Also stops the batch timer to prevent upload attempts without a session
   Future<void> clearOnDisconnect() async {
+    // Bump FIRST: a scope answer's write may still be in flight (the send
+    // and its enqueue are separated by a mesh round trip), and it checks
+    // this before every attempt it makes. Bumping before the clear below
+    // means such a write sees the new generation and cannot resurrect a
+    // stale item into a queue this call is about to empty.
+    _generation++;
+
     // Stop timers to prevent upload attempts without session
     _batchTimer?.cancel();
     _batchTimer = null;
@@ -1033,7 +1315,13 @@ class ApiQueueService {
           'offline session could upload (kept ${deliverable.length} untagged item(s))');
     }
 
-    return deliverable.map((item) => item.toApiJson()).toList();
+    // Hive-then-memory concatenation order says nothing about which item's
+    // DISC counterpart went out first, so every SCOPES row is moved after
+    // every other row here (a stable partition): the server records a
+    // batch's DISC-heard keys before it checks any SCOPES in it, and this
+    // snapshot becomes a fresh offline session that re-uploads in chunks.
+    return orderDiscBeforeScopes(
+        deliverable.map((item) => item.toApiJson()).toList());
   }
 
   /// Dispose of resources

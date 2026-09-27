@@ -17,7 +17,7 @@ part 'api_queue_item.g.dart';
 @HiveType(typeId: 3)
 class ApiQueueItem extends HiveObject {
   @HiveField(0)
-  final String type; // 'TX', 'RX', 'DISC', 'TRACE' or 'DEFER'
+  final String type; // 'TX', 'RX', 'DISC', 'TRACE', 'DEFER' or 'SCOPES'
 
   @HiveField(1)
   final double latitude;
@@ -90,6 +90,14 @@ class ApiQueueItem extends HiveObject {
   @HiveField(20)
   final String? radioFreq;
 
+  /// A repeater's scope discovery answer, sent only for a SCOPES item. The
+  /// list is exactly what the repeater sent (case kept, `*` kept, at most
+  /// 33 entries, may be empty). Null for every other type. The answering
+  /// repeater's public key rides in [heardRepeats] instead, the DISC/DEFER
+  /// packing precedent, since a list needs its own field.
+  @HiveField(21)
+  final List<String>? scopes;
+
   ApiQueueItem({
     required this.type,
     required this.latitude,
@@ -107,6 +115,7 @@ class ApiQueueItem extends HiveObject {
     this.altitude,
     this.autoMode,
     this.radioFreq,
+    this.scopes,
   });
 
   /// Create from TX ping
@@ -299,8 +308,51 @@ class ApiQueueItem extends HiveObject {
     );
   }
 
+  /// A repeater's answer to a direct scope discovery question, sent only
+  /// after a discovery found it. The public key rides in [heardRepeats]
+  /// (the DISC/DEFER packing precedent); the answer itself needs its own
+  /// field since a list cannot be squeezed safely into that string. Never
+  /// stamped with the auto mode, the DEFER precedent again: this is a
+  /// repeater fact, not a session-mode analytics stamp.
+  factory ApiQueueItem.fromScopes({
+    required String publicKeyHex,
+    required List<String> scopes,
+    required double lat,
+    required double lon,
+    required int timestamp,
+    String? radioFreq,
+  }) {
+    return ApiQueueItem(
+      type: 'SCOPES',
+      latitude: lat,
+      longitude: lon,
+      timestamp: DateTime.fromMillisecondsSinceEpoch(timestamp * 1000),
+      heardRepeats: publicKeyHex,
+      canUploadAfter: DateTime.now().millisecondsSinceEpoch, // Immediate
+      externalAntenna: false,
+      scopes: scopes,
+      radioFreq: radioFreq,
+    );
+  }
+
   /// Convert to API JSON format (matches WebClient exactly)
   Map<String, dynamic> toApiJson() {
+    // A repeater's scope answer: public key, the scopes exactly as heard,
+    // when the answer arrived, and where the discovery that found it was
+    // made. Never the mode stamp and never external_antenna/noisefloor/
+    // altitude/power, the DEFER precedent.
+    if (type == 'SCOPES') {
+      return {
+        'type': type,
+        'public_key': heardRepeats,
+        'scopes': scopes ?? const <String>[],
+        'timestamp': timestamp.millisecondsSinceEpoch ~/ 1000,
+        'lat': latitude,
+        'lon': longitude,
+        if (radioFreq != null) 'radio_freq': radioFreq,
+      };
+    }
+
     // A deferral carries only the square and which kind of ping was held.
     // Never the mode stamp (the server stores none for a deferral), but the
     // radio tag rides along.

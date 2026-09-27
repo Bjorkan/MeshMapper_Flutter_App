@@ -3224,6 +3224,7 @@ class AppStateProvider extends ChangeNotifier with WidgetsBindingObserver {
     // Every queued item is stamped with the mode that produced it.
     _apiQueueService.autoModeGetter = () => wireAutoMode;
     _apiQueueService.radioConfigGetter = () => liveRadioConfig;
+    _apiQueueService.scopesAllowedGetter = () => _apiService.scopeDiscoveryOffered;
 
     // MyMeshMapper portal account. Mobile only — the sign-in flow needs an
     // OS-registered URL scheme, which the web build cannot have.
@@ -8515,7 +8516,7 @@ class AppStateProvider extends ChangeNotifier with WidgetsBindingObserver {
 
     // Check if session has pings
     final sessionData = session.data;
-    final pings = (sessionData['pings'] as List<dynamic>?)
+    var pings = (sessionData['pings'] as List<dynamic>?)
         ?.map((p) => Map<String, dynamic>.from(p as Map))
         .toList();
 
@@ -8655,6 +8656,32 @@ class AppStateProvider extends ChangeNotifier with WidgetsBindingObserver {
 
     debugLog(
         '[OFFLINE] Authenticated with isolated session: $offlineSessionId');
+
+    // Strip SCOPES rows the upload auth cannot accept, persisting the
+    // stripped session BEFORE any chunk is built below: the partial-upload
+    // cleanup removes a PREFIX of the session's rows by uploaded count, so
+    // rows filtered out after chunking would make that count point at the
+    // wrong rows. Ruling 6: the door only closes when the key itself is
+    // absent, never on `scope_discovery: false` (key present, not
+    // enforced), since the server accepts a verified answer whatever the
+    // flag says.
+    if (!effectiveAuth.containsKey('scope_discovery')) {
+      final stripped = withoutScopesItems(pings);
+      final removedCount = pings.length - stripped.length;
+      if (removedCount > 0) {
+        pings = stripped;
+        await _offlineSessionService.replacePings(filename, pings);
+        debugLog(
+            '[OFFLINE] Stripped $removedCount SCOPES item(s): the upload auth '
+            'did not offer scope discovery');
+      }
+    }
+
+    // The server records a chunk's DISC-heard keys before it checks any
+    // SCOPES in it, but refuses a SCOPES whose DISC only arrives in a LATER
+    // chunk, so every SCOPES row is moved after every other row (a stable
+    // partition) before the pings are split into chunks below.
+    pings = orderDiscBeforeScopes(pings);
 
     // Server can take several seconds to make a freshly-created offline session
     // visible to /wardrive (read-after-write propagation). Give it a brief settle,

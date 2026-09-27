@@ -101,4 +101,54 @@ void main() {
     expect(reopened.getAt(0)!.toApiJson()['radio_freq'], '910.525,62.5,7,5');
     expect(reopened.getAt(1)!.toApiJson()['radio_freq'], '906.875,250,10,5');
   });
+
+  test('a SCOPES item survives the adapter with its scopes list intact',
+      () async {
+    final box = await Hive.openBox<ApiQueueItem>('roundtrip4');
+    await box.add(ApiQueueItem.fromScopes(
+      publicKeyHex:
+          'A3B2C1D4E5F6A7B8C9D0E1F2A3B4C5D6E7F8A9B0C1D2E3F4A5B6C7D8E9F0A1B2',
+      scopes: const ['ROOM1', '*'],
+      lat: 45.26974,
+      lon: -75.77746,
+      timestamp: 1757400000,
+      radioFreq: '910.525,62.5,7,5',
+    ));
+    await box.close();
+
+    final reopened = await Hive.openBox<ApiQueueItem>('roundtrip4');
+    final item = reopened.getAt(0)!;
+    expect(item.type, 'SCOPES');
+    expect(item.scopes, ['ROOM1', '*']);
+    expect(item.toApiJson(), {
+      'type': 'SCOPES',
+      'public_key':
+          'A3B2C1D4E5F6A7B8C9D0E1F2A3B4C5D6E7F8A9B0C1D2E3F4A5B6C7D8E9F0A1B2',
+      'scopes': ['ROOM1', '*'],
+      'timestamp': 1757400000,
+      'lat': 45.26974,
+      'lon': -75.77746,
+      'radio_freq': '910.525,62.5,7,5',
+    });
+  });
+
+  test('an item written before field 21 existed reads scopes as null',
+      () async {
+    final box = await Hive.openBox<ApiQueueItem>('roundtrip5');
+    // A plain RX never touches the scopes field at all, the same shape any
+    // item written before field 21 was added would have on disk.
+    await box.add(ApiQueueItem.fromRx(
+      latitude: 45.0,
+      longitude: -75.0,
+      heardRepeats: '4e(12.0)',
+      timestamp: 1757400000,
+      externalAntenna: false,
+    ));
+    await box.close();
+
+    final reopened = await Hive.openBox<ApiQueueItem>('roundtrip5');
+    final item = reopened.getAt(0)!;
+    expect(item.scopes, isNull);
+    expect(item.toApiJson().containsKey('scopes'), isFalse);
+  });
 }

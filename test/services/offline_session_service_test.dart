@@ -74,6 +74,31 @@ void main() {
     });
 
     test(
+        'replacePings rewrites the whole list and persists it, unlike removeProcessedPings which only drops a prefix',
+        () async {
+      SharedPreferences.setMockInitialValues({});
+      final service = OfflineSessionService();
+      await service.init();
+
+      final rows = [
+        {'type': 'DISC', 'seq': 0},
+        {'type': 'SCOPES', 'seq': 1},
+        {'type': 'RX', 'seq': 2},
+        {'type': 'SCOPES', 'seq': 3},
+      ];
+      await service.updateCurrentSession(rows, deviceName: 'Test');
+      final filename = service.sessions.single.filename;
+
+      final withoutScopes = rows.where((r) => r['type'] != 'SCOPES').toList();
+      await service.replacePings(filename, withoutScopes);
+
+      final reloaded = service.getSession(filename)!;
+      expect(reloaded.pingCount, 2);
+      expect(reloaded.data['pings'], withoutScopes);
+      expect(reloaded.data['ping_count'], 2);
+    });
+
+    test(
         'final save with empty queue still finalizes, so next session does not append to the old one',
         () async {
       SharedPreferences.setMockInitialValues({});
