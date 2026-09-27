@@ -334,24 +334,92 @@ void main() {
     });
 
     test('two answers persisting at once both land (serialized writes)', () async {
+      final release1 = Completer<void>();
       final saves = <Map<String, dynamic>>[];
+      var saveCallCount = 0;
       final budget = ScopeHourlyBudget(save: (json) async {
-        // Simulate two overlapping writes: without serialization, the
-        // first one to finish "wins" and could clobber the second.
-        await Future<void>.delayed(Duration.zero);
+        saveCallCount++;
+        if (saveCallCount == 1) {
+          // Hold the first save open so a second, concurrent persist has
+          // every chance to jump ahead if writes are not actually
+          // serialized.
+          await release1.future;
+        }
         saves.add(json);
       });
+
       expect(budget.tryConsume(keyA, now), isTrue);
-      expect(budget.tryConsume(keyB, now), isTrue);
       final f1 = budget.persistReservation(keyA, now ~/ 3600);
+
+      expect(budget.tryConsume(keyB, now), isTrue);
       final f2 = budget.persistReservation(keyB, now ~/ 3600);
+
+      // Let every pending microtask and timer run while the first save is
+      // still held open. Without serialization the second save would have
+      // started (and, being unheld, even landed) by now.
+      await Future<void>.delayed(Duration.zero);
+      expect(saveCallCount, 1,
+          reason: 'the second save must wait for the first to finish');
+      expect(saves, isEmpty, reason: 'nothing has landed yet');
+
+      release1.complete();
       final results = await Future.wait([f1, f2]);
       expect(results, [isTrue, isTrue]);
+      expect(saveCallCount, 2);
+
       // The last write to actually land reflects both reservations: no
       // lost update.
       final last = saves.last;
       expect(last['$keyA|${now ~/ 3600}'], 1);
       expect(last['$keyB|${now ~/ 3600}'], 1);
+    });
+
+    test('two overlapping reservations for the same bucket: it survives '
+        'until BOTH complete, not just the first', () async {
+      const hour10 = 10;
+      const hour13 = 13;
+      const hour14 = 14;
+      var saveCallCount = 0;
+      final release1 = Completer<void>();
+      final release2 = Completer<void>();
+      final budget = ScopeHourlyBudget(save: (json) async {
+        saveCallCount++;
+        if (saveCallCount == 1) {
+          await release1.future;
+        } else if (saveCallCount == 2) {
+          await release2.future;
+        }
+      });
+
+      expect(budget.tryConsume(keyA, hour10 * 3600), isTrue);
+      final f1 = budget.persistReservation(keyA, hour10);
+
+      expect(budget.tryConsume(keyA, hour10 * 3600 + 1), isTrue);
+      final f2 = budget.persistReservation(keyA, hour10);
+
+      // Let only the first of the two overlapping saves for hour10 finish.
+      release1.complete();
+      await f1;
+      expect(budget.toJson()['$keyA|$hour10'], 2,
+          reason: 'the second save for the same bucket has not finished');
+
+      // A much later hour's own persist must not drop the still-in-flight
+      // hour10 bucket just because ONE of its two saves finished.
+      expect(budget.tryConsume(keyA, hour13 * 3600), isTrue);
+      final f13 = budget.persistReservation(keyA, hour13);
+      expect(budget.toJson()['$keyA|$hour10'], 2,
+          reason: 'hour10 is still in flight (second save not finished)');
+
+      // Finish the second save too.
+      release2.complete();
+      await Future.wait([f2, f13]);
+
+      // Now that BOTH persists for hour10 are done, it is no longer in
+      // flight, and a later persist is free to drop it once it is stale.
+      expect(budget.tryConsume(keyA, hour14 * 3600), isTrue);
+      await budget.persistReservation(keyA, hour14);
+      expect(budget.toJson()['$keyA|$hour10'], isNull,
+          reason: 'hour10 finished (both saves) and is now old enough to drop');
     });
 
     test('an answer consumed at 10:59:59 whose persistence finishes at '

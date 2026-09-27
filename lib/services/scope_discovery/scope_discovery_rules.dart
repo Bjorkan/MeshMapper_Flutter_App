@@ -168,12 +168,16 @@ class ScopeHourlyBudget {
   final Future<void> Function(Map<String, dynamic> json) _save;
   final Map<String, int> _counts = {};
 
-  /// Buckets (`deviceKey|hour`) with a [persistReservation] call still
-  /// running: added when that call starts, removed only when its own save
-  /// settles (success or failure), whatever turn it happens to be taking on
-  /// the write chain. A bucket in here is never dropped as stale, however
-  /// old it has become in the meantime.
-  final Set<String> _inFlightBuckets = {};
+  /// Buckets (`deviceKey|hour`) with one or more [persistReservation] calls
+  /// still running, counted by how many: incremented when a call starts,
+  /// decremented only when that call's own save settles (success or
+  /// failure), whatever turn it happens to be taking on the write chain. A
+  /// bucket stays in here (count above zero) as long as any of its calls is
+  /// still outstanding, so two overlapping reservations for the same bucket
+  /// keep it protected until BOTH finish, not just the first; it is never
+  /// dropped as stale while its count is above zero, however old it has
+  /// become in the meantime.
+  final Map<String, int> _inFlightBuckets = {};
 
   Future<void> _chain = Future<void>.value();
 
@@ -244,7 +248,7 @@ class ScopeHourlyBudget {
   /// answer, it never grants an extra slot.
   Future<bool> persistReservation(String deviceKey, int hour) {
     final bucketKey = _bucketKey(deviceKey, hour);
-    _inFlightBuckets.add(bucketKey);
+    _inFlightBuckets[bucketKey] = (_inFlightBuckets[bucketKey] ?? 0) + 1;
     _dropStale(hour);
     final result = Completer<bool>();
     _chain = _chain.then((_) async {
@@ -255,17 +259,22 @@ class ScopeHourlyBudget {
         debugWarn('[SCOPES] Failed to persist scope hour budget: $e');
         result.complete(false);
       } finally {
-        _inFlightBuckets.remove(bucketKey);
+        final remaining = (_inFlightBuckets[bucketKey] ?? 1) - 1;
+        if (remaining <= 0) {
+          _inFlightBuckets.remove(bucketKey);
+        } else {
+          _inFlightBuckets[bucketKey] = remaining;
+        }
       }
     });
     return result.future;
   }
 
   /// Drops buckets older than the previous hour relative to [currentHour],
-  /// except one still named in [_inFlightBuckets].
+  /// except one still counted in [_inFlightBuckets].
   void _dropStale(int currentHour) {
     _counts.removeWhere((key, _) {
-      if (_inFlightBuckets.contains(key)) return false;
+      if (_inFlightBuckets.containsKey(key)) return false;
       final hour = _hourOf(key);
       return hour != null && hour < currentHour - 1;
     });
