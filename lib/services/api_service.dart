@@ -951,9 +951,15 @@ class ApiService {
           // Scope discovery (APP_API.md). The key's PRESENCE is the gate: a
           // server that predates the feature would store a SCOPES item as a
           // TX row.
+          final wasOffered = _scopeDiscoveryOffered;
+          final wasEnforced = _enforceScopeDiscovery;
           _scopeDiscoveryOffered = data.containsKey('scope_discovery');
           final sd = data['scope_discovery'];
           _enforceScopeDiscovery = sd == true || sd == 1;
+          if (wasOffered != _scopeDiscoveryOffered ||
+              wasEnforced != _enforceScopeDiscovery) {
+            onScopeDiscoveryChanged?.call();
+          }
           final sdDays = data['scope_refresh_days'];
           _apiScopeRefreshDays = sdDays is num && sdDays.isFinite
               ? (sdDays.toInt() < 7 ? 7 : sdDays.toInt())
@@ -1631,9 +1637,12 @@ class ApiService {
     _apiHopBytes = 1;
     _enforceSmartPing = false;
     _apiSmartPingDays = 14;
+    final scopeWasOffered = _scopeDiscoveryOffered;
+    final scopeWasEnforced = _enforceScopeDiscovery;
     _scopeDiscoveryOffered = false;
     _enforceScopeDiscovery = false;
     _apiScopeRefreshDays = 14;
+    if (scopeWasOffered || scopeWasEnforced) onScopeDiscoveryChanged?.call();
     _heartbeatTimer?.cancel();
     _heartbeatTimer = null;
     _heartbeatRetryTimer?.cancel();
@@ -1662,6 +1671,12 @@ class ApiService {
 
   /// Callback for maintenance mode detection (while connected)
   void Function(String message, String? url)? onMaintenanceMode;
+
+  /// Fired synchronously whenever [scopeDiscoveryOffered] or
+  /// [enforceScopeDiscovery] changes (a live `/auth` answer, or the session
+  /// being cleared), so scope work the server just withdrew stops before its
+  /// next write to the radio.
+  void Function()? onScopeDiscoveryChanged;
 
   /// Fired when /auth returns a session id different from the one we held.
   /// Wired to ApiQueueService.dropStaleTaggedItems(). See that method for why.

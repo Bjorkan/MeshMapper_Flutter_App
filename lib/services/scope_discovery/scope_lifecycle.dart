@@ -38,6 +38,7 @@ enum ScopeStopEvent {
   userDisconnect('disconnect'),
   disconnectCleanup('disconnect cleanup'),
   autoReconnect('link lost'),
+  gateClosed('scope discovery switched off'),
   dispose('disposed');
 
   /// The stop reason logged by the runner.
@@ -130,6 +131,19 @@ class ScopeLifecycle {
       _restores.clear();
       _restoresOwner = null;
     }
+  }
+
+  /// Called whenever a gate input changes outside the stop events: a live
+  /// `/auth` answer (a session recovery included) that drops or disables
+  /// `scope_discovery`, or the user's own switch. A gate that is now closed
+  /// cancels the live runner at once, so a lease mid-exchange writes nothing
+  /// more (no borrow, no scope request). An open gate changes nothing.
+  void onGateChanged(ScopeGateInputs gate) {
+    if (scopeDiscoveryGateOpen(gate)) return;
+    final live = _live;
+    if (live == null || live.isCancelled) return;
+    debugLog('[SCOPES] Scope discovery switched off with a request running');
+    onEvent(ScopeStopEvent.gateClosed);
   }
 
   /// Awaits [fetch] (started for [zone] under [preset]) and returns its

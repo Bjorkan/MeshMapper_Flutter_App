@@ -3343,6 +3343,12 @@ class AppStateProvider extends ChangeNotifier with WidgetsBindingObserver {
 
     _apiService.onSessionExpiredRecovery = _recoverExpiredLiveSession;
 
+    // A live /auth answer (a session recovery included) can withdraw scope
+    // discovery while a lease is mid-exchange; the runner must stop before
+    // its next write, not at the next sweep.
+    _apiService.onScopeDiscoveryChanged =
+        () => _scopeLifecycle.onGateChanged(_scopeGateInputs);
+
     _apiService.onRegionalCarpeaters = (keys, error) {
       unawaited(_onRegionalCarpeaters(keys, error));
     };
@@ -8943,6 +8949,7 @@ class AppStateProvider extends ChangeNotifier with WidgetsBindingObserver {
         'externalAntenna=${preferences.externalAntenna}, autoPowerSet=${preferences.autoPowerSet}');
 
     _preferences = preferences;
+    _scopeLifecycle.onGateChanged(_scopeGateInputs);
 
     // Update user-original baseline when user changes zone-overridable settings
     if (_userOriginalAutoPingInterval != null) {

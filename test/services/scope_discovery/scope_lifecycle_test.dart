@@ -1,13 +1,20 @@
+import 'dart:convert';
 import 'dart:typed_data';
 
 import 'package:clock/clock.dart';
 import 'package:fake_async/fake_async.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:http/http.dart' as http;
+import 'package:http/testing.dart';
+import 'package:mesh_mapper/services/api_service.dart';
 import 'package:mesh_mapper/services/meshcore/connection.dart';
 import 'package:mesh_mapper/services/meshcore/scope_lease.dart';
 import 'package:mesh_mapper/services/scope_discovery/scope_discovery_rules.dart';
 import 'package:mesh_mapper/services/scope_discovery/scope_lifecycle.dart';
+import 'package:mesh_mapper/services/meshcore/protocol_constants.dart';
 import 'package:mesh_mapper/services/scope_discovery/scope_runner.dart';
+
+import '../meshcore/scope_test_support.dart' as support;
 
 /// A radio that grants a lease and holds the ask until it is cancelled,
 /// recording every frame it would have written.
@@ -320,6 +327,98 @@ void main() {
         expect(settled, isTrue);
         expect(applied, isNull);
       });
+    });
+  });
+
+  group('a live auth that withdraws scope discovery', () {
+    test('stops a pending lookup before the scope request is written', () {
+      support.onScopeClock(support.ScopeRadio.new, (async, radio, conn) {
+        var offerScopes = true;
+        final api = ApiService(
+          client: MockClient((request) async => http.Response(
+              json.encode({
+                'success': true,
+                'session_id': 'YOW-20260905-0001',
+                'tx_allowed': true,
+                'rx_allowed': true,
+                'expires_at':
+                    clock.now().millisecondsSinceEpoch ~/ 1000 + 300,
+                if (offerScopes) 'scope_discovery': false,
+              }),
+              200)),
+        );
+        void auth() {
+          api.requestAuth(
+              reason: 'connect',
+              publicKey: 'AB' * 32,
+              lat: 45.42,
+              lon: -75.70);
+          async.elapse(const Duration(milliseconds: 10));
+        }
+
+        ScopeGateInputs gate() => (
+              offered: api.scopeDiscoveryOffered,
+              enforced: api.enforceScopeDiscovery,
+              userEnabled: true,
+              offlineMode: false,
+              firmwareCode: 13,
+            );
+        final h = _Harness();
+        // The provider's wiring, as in AppStateProvider.
+        api.onScopeDiscoveryChanged = () => h.lifecycle.onGateChanged(gate());
+
+        auth();
+        expect(api.scopeDiscoveryOffered, isTrue);
+        final runner = h.lifecycle.buildRunner(
+          gate: gate(),
+          connection: conn,
+          deviceKey: 'KEY',
+          create: (key, restores) => ScopeRunner(
+            radio: MeshCoreScopeRadio(conn),
+            cancel: ScopeCancelToken(),
+            hardStop: clock.now().add(const Duration(seconds: 30)),
+            refreshDays: () => 14,
+            deviceKey: () => key,
+            serverInfo: (_) => (onList: false, checkedAt: null),
+            cache: ScopeQueryCache.fromJson(null),
+            budget: ScopeHourlyBudget(save: (_) async {}),
+            enqueue: (_, __) async => true,
+            nowSec: () => clock.now().millisecondsSinceEpoch ~/ 1000,
+            currentPosition: () => null,
+            stillWanted: () => true,
+            onActiveChanged: h.lifecycle.setRequestActive,
+            onLogged: (_) {},
+            pendingRestores: restores,
+          ),
+        )!;
+        runner.run([_cand(0x11)], discPersisted: Future<void>.value());
+        async.flushMicrotasks();
+        expect(radio.commands, [CommandCodes.getContactByKey],
+            reason: 'the lookup is out and unanswered');
+
+        // A session recovery's answer arrives without the key.
+        offerScopes = false;
+        auth();
+        expect(api.scopeDiscoveryOffered, isFalse);
+        expect(runner.isCancelled, isTrue);
+        expect(h.lifecycle.requestActive, isFalse);
+
+        // The lookup's reply (not a saved contact) would lead straight to
+        // the scope request.
+        radio.emit([ResponseCodes.err, ErrorCodes.notFound]);
+        async.elapse(const Duration(seconds: 10));
+        expect(radio.commands, isNot(contains(CommandCodes.sendAnonReq)));
+        expect(radio.commands, [CommandCodes.getContactByKey]);
+        expect(conn.isScopeLeaseActive, isFalse);
+      });
+    });
+
+    test('an answer that keeps it offered cancels nothing', () {
+      final h = _Harness();
+      final runner = h.build()!;
+      h.lifecycle.onGateChanged(_gate());
+      expect(runner.isCancelled, isFalse);
+      expect(h.hostCancels, isEmpty);
     });
   });
 }
