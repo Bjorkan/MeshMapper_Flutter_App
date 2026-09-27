@@ -84,7 +84,8 @@ class _FakeConnection implements MeshCoreConnection {
   Stream<Uint8List> get traceDataStream => const Stream.empty();
 
   @override
-  Future<Uint8List> sendDiscoveryRequest() => Future.value(Uint8List(4));
+  Future<({Uint8List tag, DateTime sentAt})> sendDiscoveryRequest() =>
+      Future.value((tag: Uint8List(4), sentAt: DateTime.now()));
 
   @override
   Future<Uint8List> sendTracePath(Uint8List repeaterIdBytes,

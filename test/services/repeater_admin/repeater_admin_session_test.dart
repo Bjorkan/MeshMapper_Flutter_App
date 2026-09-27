@@ -4,6 +4,8 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:mesh_mapper/services/meshcore/buffer_utils.dart';
 import 'package:mesh_mapper/services/meshcore/connection.dart';
 import 'package:mesh_mapper/services/meshcore/protocol_constants.dart';
+import 'package:mesh_mapper/services/meshcore/scope_lease.dart';
+import 'package:mesh_mapper/services/repeater_admin/manage_target.dart';
 import 'package:mesh_mapper/services/repeater_admin/repeater_admin_models.dart';
 import 'package:mesh_mapper/services/repeater_admin/repeater_admin_session.dart';
 
@@ -390,6 +392,25 @@ void main() {
           [CommandCodes.resetPath, ...repeaterKey]);
       transport.emit([ResponseCodes.ok]);
       expect(await retry, isTrue);
+    });
+
+    test('a scope lease, then its reply debt, refuse a command', () async {
+      final lease = await connection.acquireScopeLease(
+          admissionWait: const Duration(seconds: 1),
+          cancel: ScopeCancelToken());
+      expect(lease, isNotNull);
+      final before = transport.writes.length;
+      expect(await session.login('admin-pw'), isFalse);
+      expect(session.lastError, kScopeRadioBusyHint);
+      await lease!.release();
+      // A command still owed its reply after the lease ends.
+      await connection.debugWriteRaw(
+          Uint8List.fromList([CommandCodes.getContactByKey, ...repeaterKey]));
+      final owed = transport.writes.length;
+      expect(await session.login('admin-pw'), isFalse);
+      expect(session.lastError, kScopeRadioBusyHint);
+      expect(transport.writes.length, owed);
+      expect(owed, before + 1);
     });
 
     test('PATH_UPDATED re-reads the contact', () async {

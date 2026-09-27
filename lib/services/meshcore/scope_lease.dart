@@ -4,6 +4,7 @@ import 'dart:typed_data';
 import 'package:clock/clock.dart';
 
 import '../../utils/debug_logger_io.dart';
+import '../scope_discovery/scope_runner.dart' show ScopeLeaseHandle;
 import 'buffer_utils.dart';
 import 'connection.dart' show ContactRecord;
 import 'protocol_constants.dart';
@@ -168,7 +169,7 @@ final class _WriteFailed extends _Reply {
 /// disconnect, or when [requestScopes] has its SENT and restore in.
 ///
 /// Created only by `MeshCoreConnection.acquireScopeLease`.
-class ScopeLease {
+class ScopeLease implements ScopeLeaseHandle {
   final ScopeLeaseHost _host;
   final ScopeCancelToken _cancel;
   final DateTime _deadline;
@@ -201,6 +202,7 @@ class ScopeLease {
   /// Records whose borrowed route has not been written back yet, oldest
   /// first. A record joins before its borrow is written and leaves only when
   /// its restore's OK arrives.
+  @override
   List<ContactRecord> get unrestored => List.unmodifiable(_unrestored);
 
   /// Asks the repeater [pubkey] for its scopes with [request]: look it up,
@@ -210,6 +212,7 @@ class ScopeLease {
   /// The answer wait is [answerWait] (or the radio's estimate plus 1 s when
   /// null), at most [kScopeAnswerWaitCap], counted from SENT and never past
   /// [notAfter]. [onSent] fires with that wait once the answer tag is armed.
+  @override
   Future<ScopeRequestOutcome> requestScopes(Uint8List pubkey, Uint8List request,
       {required Duration? answerWait,
       required DateTime notAfter,
@@ -410,6 +413,7 @@ class ScopeLease {
 
   /// Writes [original] back byte for byte. Resolves true when its OK
   /// arrives; otherwise the record stays in [unrestored] for a later lease.
+  @override
   Future<bool> restore(ContactRecord original) async {
     if (!_active) return false;
     _addUnrestored(original);
@@ -437,6 +441,7 @@ class ScopeLease {
 
   /// Ends the lease now. Idempotent. A reply still owed stays in the
   /// connection's ledger until it arrives or expires.
+  @override
   Future<void> release() async {
     _end(_LeaseEnd.released);
   }

@@ -718,6 +718,7 @@ class _TargetedPingSectionState extends State<_TargetedPingSection> {
           isAutoReconnecting: appState.isAutoReconnecting,
           companionFirmwareSupported: companionSupportsRepeaterAdmin(
               appState.companionFirmwareVersionCode),
+          scopeRadioBusy: appState.isScopeRadioBusy,
         );
         final manageHint = manageBlock ??
             (manageTarget == null ? kChooseFromListHint : 'Manage repeater');

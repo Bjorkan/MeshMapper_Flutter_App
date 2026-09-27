@@ -94,7 +94,8 @@ class _FakeConnection implements MeshCoreConnection {
     // A released banked discovery reaches the real send path, unlike the
     // deferral tests where validation returns first.
     if (invocation.memberName == #sendDiscoveryRequest) {
-      return Future<Uint8List>.value(Uint8List.fromList([1, 2, 3, 4]));
+      return Future.value(
+          (tag: Uint8List.fromList([1, 2, 3, 4]), sentAt: DateTime.now()));
     }
     throw UnimplementedError('MeshCoreConnection.${invocation.memberName}');
   }

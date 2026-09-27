@@ -1,6 +1,8 @@
 import 'dart:async';
 import 'dart:typed_data';
 
+import 'package:clock/clock.dart';
+import 'package:flutter/foundation.dart' show visibleForTesting;
 import 'package:geolocator/geolocator.dart';
 
 import '../models/connection_state.dart';
@@ -13,11 +15,14 @@ import 'countdown_timer_service.dart';
 import 'gps_service.dart';
 import 'meshcore/connection.dart';
 import 'meshcore/disc_tracker.dart';
+import 'meshcore/protocol_constants.dart' show DiscoveryConstants;
+import 'meshcore/scope_lease.dart' show ScopeCancelToken;
 import 'meshcore/trace_tracker.dart';
 import 'meshcore/tx_tracker.dart';
 import 'meshcore/wire_tag_codec.dart';
 import 'meshcore/unified_rx_handler.dart';
 import 'recent_coverage_service.dart';
+import 'scope_discovery/scope_runner.dart';
 import 'wakelock_service.dart';
 
 /// Ping service for TX/RX ping orchestration
@@ -178,6 +183,20 @@ class PingService {
   Position?
       _lastDiscoveryPosition; // Track last discovery position for 25m check
 
+  /// The earliest the next discovery can go out, recorded whenever a timer
+  /// that leads to one is armed. A conservative bound for the scope runner's
+  /// hard stop only: it never changes when any timer fires.
+  DateTime? _earliestNextDiscoveryAt;
+
+  /// The live scope runner, if a sweep's runner is still working.
+  ScopeRunner? _currentScopeRunner;
+
+  /// Builds the scope runner for one discovery sweep, or returns null when
+  /// scope discovery is not active. Set by the provider.
+  ScopeRunner? Function(
+      {required DateTime hardStop,
+      required ScopeCancelToken cancel})? scopeRunnerFactory;
+
   // Validation callbacks
   bool Function()? checkExternalAntennaConfigured;
   bool Function()? checkPowerLevelConfigured;
@@ -327,6 +346,25 @@ class PingService {
 
   /// Get current auto-ping interval in milliseconds
   int get autoPingIntervalMs => _autoPingIntervalMs;
+
+  /// The earliest the next discovery can go out (see the field).
+  @visibleForTesting
+  DateTime? get earliestNextDiscoveryAt => _earliestNextDiscoveryAt;
+
+  /// True while a sweep's scope runner is still working.
+  bool get isScopeRunnerActive => _currentScopeRunner != null;
+
+  /// Stops the live scope runner at once: nothing more goes on the air for
+  /// it and its badge clears. Called by every stop path, and by the
+  /// provider for the paths that end a session without passing through
+  /// here (Offline Mode switch, zone transfer, disconnect).
+  void cancelScopeRunner(String reason) {
+    final runner = _currentScopeRunner;
+    if (runner == null) return;
+    // Cancel while it is still current, so its badge clears.
+    runner.cancel(reason);
+    _currentScopeRunner = null;
+  }
 
   /// Hold new TX attempts while a replacement API session is being installed.
   /// Any TX already on air drains through its normal listening window first.
@@ -557,7 +595,7 @@ class PingService {
     // Check cooldown (5 seconds between pings)
     final lastTx = _lastTxTime;
     if (lastTx != null) {
-      final elapsed = DateTime.now().difference(lastTx);
+      final elapsed = clock.now().difference(lastTx);
       if (elapsed < _autoPingCooldown) {
         return PingValidation.cooldownActive;
       }
@@ -678,7 +716,7 @@ class PingService {
     // Check cooldown (5 seconds between pings)
     final lastTx = _lastTxTime;
     if (lastTx != null) {
-      final elapsed = DateTime.now().difference(lastTx);
+      final elapsed = clock.now().difference(lastTx);
       if (elapsed < _autoPingCooldown) {
         return PingValidation.cooldownActive;
       }
@@ -692,7 +730,7 @@ class PingService {
   bool isInCooldown() {
     final lastTx = _lastTxTime;
     if (lastTx == null) return false;
-    final elapsed = DateTime.now().difference(lastTx);
+    final elapsed = clock.now().difference(lastTx);
     return elapsed < _autoPingCooldown;
   }
 
@@ -700,7 +738,7 @@ class PingService {
   int getRemainingCooldownSeconds() {
     final lastTx = _lastTxTime;
     if (lastTx == null) return 0;
-    final elapsed = DateTime.now().difference(lastTx);
+    final elapsed = clock.now().difference(lastTx);
     final remaining = _autoPingCooldown - elapsed;
     return remaining.inSeconds.clamp(0, _autoPingCooldown.inSeconds);
   }
@@ -1100,7 +1138,7 @@ class PingService {
       }
 
       // Mark ping time and position
-      _lastTxTime = DateTime.now();
+      _lastTxTime = clock.now();
       _gpsService.markPingPosition(position);
 
       // Start appropriate cooldown timer
@@ -1598,6 +1636,9 @@ class PingService {
       debugLog('[PING] Ping in progress, queuing disable for after RX window');
       _pendingDisable = true;
       _armPendingDisableTimeout();
+      // The stop is accepted now, even though the ping drains later: the
+      // scope runner stops with it, before this returns.
+      cancelScopeRunner('stop');
       return true; // Return true to indicate disable was accepted (pending)
     }
 
@@ -1609,6 +1650,8 @@ class PingService {
           '[ACTIVE MODE] Stop blocked by cooldown (${remainingSec}s remaining)');
       return false;
     }
+
+    cancelScopeRunner('stop');
 
     // Clear auto timer
     _autoTimer?.cancel();
@@ -1738,6 +1781,7 @@ class PingService {
     // epoch move when it resumes and bows out without transmitting, leaving
     // the flag to whoever holds it by then.
     _sendEpoch++;
+    cancelScopeRunner('force disable');
     _pingInProgress = false;
     if (!_txWindowFinalizing) {
       _cancelPendingTxWindow();
@@ -1856,6 +1900,9 @@ class PingService {
     // path that tears the lane down. TraceTracker needs no equivalent: its
     // dispose() calls _endWindow() while listening, which does fire.
     _discoveryWindowCountdown.stop();
+
+    cancelScopeRunner('discovery stopped');
+    _earliestNextDiscoveryAt = null;
 
     _discoveryTimer?.cancel();
     _discoveryTimer = null;
@@ -2046,12 +2093,17 @@ class PingService {
         // Play transmit sound immediately before sending
         _audioService?.playTransmitSound();
 
-        // Send discovery request and get tag
-        final tag = await _connection.sendDiscoveryRequest();
+        // The previous sweep's scope runner never overlaps this one's
+        // request: it stops right before the write.
+        cancelScopeRunner('next discovery');
 
-        // Start tracking with the tag
+        // Send discovery request and get tag
+        final sent = await _connection.sendDiscoveryRequest();
+
+        // Start tracking with the tag, timing own replies from the send
         _discTracker?.startTracking(
-          tag: tag,
+          tag: sent.tag,
+          sentAt: sent.sentAt,
           windowDuration: _discoveryListeningWindow,
         );
 
@@ -2130,13 +2182,16 @@ class PingService {
 
     // Use _lastDiscPing which was already created and added to log in _sendDiscoveryRequest
     final discoverySuccess = _lastDiscPing?.discoveredNodes.isNotEmpty ?? false;
+    // The sweep's DISC writes. Nothing waits on them unless a scope runner
+    // starts, which must not ask before they are safely queued.
+    final discWrites = <Future<void>>[];
 
     if (discoverySuccess) {
       debugLog('[DISC] Processing ${nodes.length} discovered nodes');
 
       // Queue API payloads for each discovered node (uses nodes for pubkeyFull)
       for (final node in nodes) {
-        _apiQueue.enqueueDisc(
+        discWrites.add(_apiQueue.enqueueDisc(
           latitude: position.latitude,
           longitude: position.longitude,
           repeaterId: node.repeaterId,
@@ -2150,7 +2205,7 @@ class PingService {
           noiseFloor: _pendingTxNoiseFloor,
           power: getPowerLevel?.call(),
           altitude: GpsService.altitudeOrNull(position),
-        );
+        ));
       }
 
       // Update stats
@@ -2188,6 +2243,59 @@ class PingService {
       return;
     }
     _scheduleNextDiscovery();
+    if (discoverySuccess) {
+      _maybeStartScopeRunner(nodes, position, discWrites);
+    }
+  }
+
+  /// Starts this sweep's scope runner alongside the schedule just armed,
+  /// never ahead of it: nothing about the next ping waits on the runner.
+  void _maybeStartScopeRunner(List<DiscoveredNode> nodes, Position position,
+      List<Future<void>> discWrites) {
+    final factory = scopeRunnerFactory;
+    if (factory == null) return;
+    if (_pendingDisable ||
+        !_autoPingEnabled ||
+        (!_passiveModeEnabled && !_hybridModeEnabled)) {
+      return;
+    }
+    final earliest = _earliestNextDiscoveryAt;
+    if (earliest == null) return;
+    // Repeaters only: a room server is never asked.
+    final candidates = <ScopeCandidate>[
+      for (final node in nodes)
+        if (node.nodeType == DiscoveryConstants.nodeTypeRepeater)
+          (
+            keyHex: node.pubkeyFull.toUpperCase(),
+            repeaterId: node.repeaterId,
+            lat: position.latitude,
+            lon: position.longitude,
+            localRssi: node.localRssi,
+            localSnr: node.localSnr,
+            discoveryReplyAfter: node.discoveryReplyAfter,
+          ),
+    ];
+    if (candidates.isEmpty) return;
+
+    cancelScopeRunner('superseded');
+    final cap = clock.now().add(ScopeRunner.maxRunnerLifetime);
+    final hardStop = earliest.isBefore(cap) ? earliest : cap;
+    final ScopeRunner? runner;
+    try {
+      runner = factory(hardStop: hardStop, cancel: ScopeCancelToken());
+    } catch (e) {
+      debugError('[SCOPES] Could not build the scope runner: $e');
+      return;
+    }
+    if (runner == null) return;
+    runner.isCurrent = () => identical(_currentScopeRunner, runner);
+    _currentScopeRunner = runner;
+    final discPersisted = Future.wait(discWrites).then((_) {});
+    unawaited(runner
+        .run(candidates, discPersisted: discPersisted)
+        .whenComplete(() {
+      if (identical(_currentScopeRunner, runner)) _currentScopeRunner = null;
+    }));
   }
 
   /// Schedule next discovery request
@@ -2211,6 +2319,7 @@ class PingService {
         _sendDiscoveryRequest();
       }
     });
+    _earliestNextDiscoveryAt = clock.now().add(_discoveryInterval);
 
     // Notify callback for countdown display (30 seconds hardcoded for discovery)
     onAutoPingScheduled?.call(_discoveryInterval.inMilliseconds, _skipReason);
@@ -2246,6 +2355,15 @@ class PingService {
       debugLog('[HYBRID] Auto mode stopped while scheduling, not arming timer');
       return;
     }
+
+    // The earliest the next discovery leg can go out: this wait when it is
+    // the discovery leg, else this wait plus the wait the scheduler arms
+    // before a discovery leg (a skipped TX arms it with no RX window).
+    final discoveryLegWaitMs = (_autoPingIntervalMs -
+            _discoveryListeningWindow.inMilliseconds)
+        .clamp(1000, _autoPingIntervalMs);
+    _earliestNextDiscoveryAt = clock.now().add(Duration(
+        milliseconds: isNextDisc ? waitMs : waitMs + discoveryLegWaitMs));
 
     _autoTimer = Timer(Duration(milliseconds: waitMs), () {
       if (!_autoPingEnabled || !_hybridModeEnabled) return;

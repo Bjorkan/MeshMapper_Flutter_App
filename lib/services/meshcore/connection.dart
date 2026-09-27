@@ -2313,10 +2313,14 @@ class MeshCoreConnection {
   /// Sends [data] with a claim on its own OK or ERR. The claim is dropped
   /// again when the write itself fails.
   Future<_OwnReplyClaim> _sendClaimingReply(
-      BufferWriter data, _OwnReplyKind kind) async {
+      BufferWriter data, _OwnReplyKind kind,
+      {void Function()? onWire}) async {
     _OwnReplyClaim? claim;
     try {
-      await _write(data.toBytes(), onWire: () => claim = _armOwnReply(kind));
+      await _write(data.toBytes(), onWire: () {
+        onWire?.call();
+        claim = _armOwnReply(kind);
+      });
     } catch (_) {
       final armed = claim;
       if (armed != null) {
@@ -2664,8 +2668,11 @@ class MeshCoreConnection {
   /// - Bytes 3-6: random tag (4 bytes)
   /// - Bytes 7-10: timestamp = 0 (discover all)
   ///
-  /// Returns the 4-byte tag used for matching responses
-  Future<Uint8List> sendDiscoveryRequest() async {
+  /// Returns the 4-byte tag used for matching responses, and [sentAt]: the
+  /// moment the frame was handed to the transport, after any sign or lease
+  /// gate wait and before the (acknowledged) transport write. That is local
+  /// command submission, not the radio's own transmission.
+  Future<({Uint8List tag, DateTime sentAt})> sendDiscoveryRequest() async {
     // Generate random 4-byte tag
     final random = Random.secure();
     final tag = Uint8List.fromList([
@@ -2687,9 +2694,11 @@ class MeshCoreConnection {
     data.writeUInt32LE(0); // timestamp = 0 (discover all)
     // Claim the OK or ERR so it cannot complete another command's waiter.
     // Nothing waits on it.
-    await _sendClaimingReply(data, _OwnReplyKind.discovery);
+    DateTime? sentAt;
+    await _sendClaimingReply(data, _OwnReplyKind.discovery,
+        onWire: () => sentAt = clock.now());
 
-    return tag;
+    return (tag: tag, sentAt: sentAt ?? clock.now());
   }
 
   /// Send trace path to a specific repeater (targeted ping / zero-hop trace)

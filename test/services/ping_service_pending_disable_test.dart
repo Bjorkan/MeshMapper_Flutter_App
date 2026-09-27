@@ -105,9 +105,10 @@ class _FakeConnection implements MeshCoreConnection {
   }
 
   @override
-  Future<Uint8List> sendDiscoveryRequest() {
+  Future<({Uint8List tag, DateTime sentAt})> sendDiscoveryRequest() {
     discoveryTransmits++;
-    return discoveryGate?.future ?? Future.value(Uint8List(4));
+    return (discoveryGate?.future ?? Future.value(Uint8List(4)))
+        .then((tag) => (tag: tag, sentAt: DateTime.now()));
   }
 
   @override

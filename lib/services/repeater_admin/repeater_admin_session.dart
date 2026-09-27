@@ -5,6 +5,7 @@ import 'package:flutter/foundation.dart';
 
 import '../../utils/debug_logger_io.dart';
 import '../meshcore/connection.dart';
+import 'manage_target.dart' show kScopeRadioBusyHint, scopeRadioBusy;
 import 'repeater_admin_models.dart';
 
 enum RepeaterAdminState { idle, ensuringContact, loggingIn, admin, guest, failed }
@@ -492,9 +493,21 @@ class RepeaterAdminSession extends ChangeNotifier {
       debugLog('[RADMIN] Command refused: ${_closed ? 'closed' : 'busy'}');
       return false;
     }
-    if (_connection.hasPendingAdminCommand) {
+    // A scope lease holds the admin slot too, so it is named first; the
+    // admin lane's own retained reply keeps its own sentence; reply debt
+    // left behind by a lease is the scope case again.
+    final scopeLease = _connection.isScopeLeaseActive;
+    if (!scopeLease && _connection.hasPendingAdminCommand) {
       _lastError = kAdminCommandPendingSentence;
       debugLog('[RADMIN] Command refused: radio request still pending');
+      _notify();
+      return false;
+    }
+    if (scopeRadioBusy(
+        isScopeLeaseActive: scopeLease,
+        hasScopeReplyDebt: _connection.hasScopeReplyDebt)) {
+      _lastError = kScopeRadioBusyHint;
+      debugLog('[RADMIN] Command refused: a scope request owns the radio');
       _notify();
       return false;
     }

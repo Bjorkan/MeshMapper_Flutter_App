@@ -103,7 +103,8 @@ class _FakeConnection implements MeshCoreConnection {
   dynamic noSuchMethod(Invocation invocation) {
     if (invocation.memberName == #sendDiscoveryRequest) {
       discoveryTransmits++;
-      return Future<Uint8List>.value(Uint8List.fromList([1, 2, 3, 4]));
+      return Future.value(
+          (tag: Uint8List.fromList([1, 2, 3, 4]), sentAt: DateTime.now()));
     }
     if (invocation.memberName == #sendPing) {
       return sendPingGate?.future ?? Future<void>.value();
