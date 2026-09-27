@@ -232,9 +232,16 @@ class DiscTracker {
             localRssi: localRssi,
             remoteSnr: remoteSnr,
             pubkeyFull: pubkeyHex,
-            discoveryReplyAfter: replyAfter ?? existing.discoveryReplyAfter,
+            // Short ids can collide: a reply time only carries over within
+            // the same full key.
+            discoveryReplyAfter: replyAfter ??
+                (existing.pubkeyFull == pubkeyHex
+                    ? existing.discoveryReplyAfter
+                    : null),
           );
-        } else if (existing.discoveryReplyAfter == null && replyAfter != null) {
+        } else if (existing.discoveryReplyAfter == null &&
+            replyAfter != null &&
+            existing.pubkeyFull == pubkeyHex) {
           nodes[repeaterId] = existing.withReplyAfter(replyAfter);
         }
       } else {

@@ -190,6 +190,12 @@ class ScopeRunner {
   ScopeLeaseHandle? _lease;
   Timer? _hardStopTimer;
 
+  /// The upload queue's generation when this sweep's DISC items were known
+  /// to be queued. Every answer of the sweep is enqueued against it, so a
+  /// queue cleared mid-sweep (which took those DISC items with it) refuses
+  /// the answers instead of queuing a SCOPES item the server would drop.
+  int? _sweepGeneration;
+
   ScopeRunner({
     required ScopeRadio radio,
     required ScopeCancelToken cancel,
@@ -292,6 +298,7 @@ class ScopeRunner {
           '${discPersistWait.inSeconds}s');
       return;
     }
+    _sweepGeneration = _queueGeneration();
 
     final nowSec = _nowSec();
     final refreshDays = _refreshDays();
@@ -435,7 +442,7 @@ class ScopeRunner {
     final ctx = ScopePersistContext(
         deviceKey: deviceKey,
         sessionId: _sessionId(),
-        queueGeneration: _queueGeneration(),
+        queueGeneration: _sweepGeneration ?? _queueGeneration(),
         budgetHour: receivedSec ~/ 3600);
     unawaited(_persist(answer, ctx));
   }

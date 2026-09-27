@@ -81,6 +81,7 @@ import '../services/reporting_power.dart';
 import 'device_connection_setup.dart';
 import '../services/repeater_admin/manage_target.dart';
 import '../services/scope_discovery/scope_discovery_rules.dart';
+import '../services/scope_discovery/scope_lifecycle.dart';
 import '../services/scope_discovery/scope_provider_support.dart';
 import '../services/scope_discovery/scope_runner.dart';
 import '../services/repeater_admin/repeater_admin_api.dart';
@@ -725,19 +726,22 @@ class AppStateProvider extends ChangeNotifier with WidgetsBindingObserver {
       ScopeHourlyBudget(save: _saveScopeHourBudget);
   late final ScopeSerialWriter _scopeCacheWriter =
       ScopeSerialWriter('scope query cache', _saveScopeQueryCache);
-  bool _isScopeRequestActive = false;
 
-  /// Routes borrowed and not yet written back, for the next runner on the
-  /// same connection. Dropped with the connection.
-  final List<ContactRecord> _scopePendingRestores = [];
-  MeshCoreConnection? _scopePendingRestoresFor;
+  /// The scope wiring: the runner gate, the badge, borrowed routes per
+  /// connection, the stop events and the refresh discard.
+  late final ScopeLifecycle _scopeLifecycle = ScopeLifecycle(
+    cancelHostRunner: (reason) => _pingService?.cancelScopeRunner(reason),
+    onBadgeChanged: () {
+      if (!_isDisposed) notifyListeners();
+    },
+  );
 
   /// The server's scope stamps, rebuilt whenever [_repeaters] is replaced.
   List<Repeater>? _scopeServerInfoSource;
   Map<String, int?> _scopeServerInfo = const {};
 
   /// True while a scope request is out (the Scopes badge).
-  bool get isScopeRequestActive => _isScopeRequestActive;
+  bool get isScopeRequestActive => _scopeLifecycle.requestActive;
 
   // ============================================
   // Regional CARpeaters (the region's shared list from /auth)
@@ -1716,7 +1720,8 @@ class AppStateProvider extends ChangeNotifier with WidgetsBindingObserver {
   /// Companion firmware code (byte 1 of RESP_CODE_DEVICE_INFO) scope
   /// discovery needs to ask a repeater at all. Below it the setting still
   /// saves, but nothing is asked and nothing extra goes on the air.
-  static const int kScopeDiscoveryCompanionVersionCode = 13;
+  static const int kScopeDiscoveryCompanionVersionCode =
+      kScopeDiscoveryFirmwareFloor;
 
   /// Whether scope discovery is forced on by the regional admin (auth
   /// `scope_discovery`).
@@ -1736,11 +1741,15 @@ class AppStateProvider extends ChangeNotifier with WidgetsBindingObserver {
   /// Whether scope discovery may actually run right now: the server offered
   /// it on the last live auth, the effective switch is on, Offline Mode never
   /// asks, and the connected companion's firmware can carry the request.
-  bool get scopeDiscoveryActive =>
-      _apiService.scopeDiscoveryOffered &&
-      scopeDiscoveryEnabled &&
-      !offlineMode &&
-      (companionFirmwareVersionCode ?? 0) >= kScopeDiscoveryCompanionVersionCode;
+  bool get scopeDiscoveryActive => scopeDiscoveryGateOpen(_scopeGateInputs);
+
+  ScopeGateInputs get _scopeGateInputs => (
+        offered: _apiService.scopeDiscoveryOffered,
+        enforced: _apiService.enforceScopeDiscovery,
+        userEnabled: _preferences.scopeDiscoveryEnabled,
+        offlineMode: offlineMode,
+        firmwareCode: companionFirmwareVersionCode,
+      );
 
   /// Whether the connected radio's firmware is below the scope discovery
   /// floor. Drives the extra warning line on the Settings switch; see
@@ -6131,7 +6140,7 @@ class AppStateProvider extends ChangeNotifier with WidgetsBindingObserver {
       return;
     }
     _cancelPendingAutoPingRestore();
-    _cancelScopeWork('disconnect cleanup', dropRestores: true);
+    _scopeLifecycle.onEvent(ScopeStopEvent.disconnectCleanup);
     _isConnecting = false;
     _connectionStep = ConnectionStep.disconnected;
 
@@ -6220,7 +6229,7 @@ class AppStateProvider extends ChangeNotifier with WidgetsBindingObserver {
 
   /// Start auto-reconnect after unexpected transport disconnect
   Future<void> _startAutoReconnect() async {
-    _cancelScopeWork('link lost', dropRestores: true);
+    _scopeLifecycle.onEvent(ScopeStopEvent.autoReconnect);
     _invalidateLiveSessionRecovery();
     await _waitForLiveSessionRecovery();
     // Defensive: cancel zone grace period if active
@@ -6590,7 +6599,7 @@ class AppStateProvider extends ChangeNotifier with WidgetsBindingObserver {
     // what aborting first is meant to prevent.
     _meshCoreConnection?.abortPendingSign();
     _meshCoreConnection?.abortPendingAdmin();
-    _cancelScopeWork('disconnect', dropRestores: true);
+    _scopeLifecycle.onEvent(ScopeStopEvent.userDisconnect);
     // awaitSessionRecoveryBounded swallows its own timeout but rethrows
     // anything else, and a recovery that throws must never abandon the
     // teardown with the radio still up: the user asked to disconnect.
@@ -7558,7 +7567,7 @@ class AppStateProvider extends ChangeNotifier with WidgetsBindingObserver {
     // Before the first await: GPS ticks overlap and disconnect() is not
     // re-entrant. Cleared in finally because disconnect() can throw mid-way.
     _airborneEndInFlight = true;
-    _cancelScopeWork('airborne');
+    _scopeLifecycle.onEvent(ScopeStopEvent.airborne);
     try {
       final info = _airborneReleaseInfo();
       debugError('[GPS] Airborne detected (${info.detail}), ending session');
@@ -8042,7 +8051,7 @@ class AppStateProvider extends ChangeNotifier with WidgetsBindingObserver {
   /// Switch from online to offline mode while connected
   Future<({bool success, String? error})> _switchToOfflineMode() async {
     debugLog('[APP] Hot-switching to offline mode while connected');
-    _cancelScopeWork('offline mode switch');
+    _scopeLifecycle.onEvent(ScopeStopEvent.offlineSwitch);
     _invalidateLiveSessionRecovery();
     await _waitForLiveSessionRecovery();
     _isSwitchingMode = true;
@@ -8118,7 +8127,7 @@ class AppStateProvider extends ChangeNotifier with WidgetsBindingObserver {
   /// Switch from offline to online mode while connected
   Future<({bool success, String? error})> _switchToOnlineMode() async {
     debugLog('[APP] Hot-switching to online mode while connected');
-    _cancelScopeWork('online mode switch');
+    _scopeLifecycle.onEvent(ScopeStopEvent.onlineSwitch);
     _isSwitchingMode = true;
     _modeSwitchError = null;
     var switchSucceeded = false;
@@ -10192,7 +10201,7 @@ class AppStateProvider extends ChangeNotifier with WidgetsBindingObserver {
 
     final oldZoneCode = _sessionZoneCode ?? 'unknown';
     _isZoneTransferInProgress = true;
-    _cancelScopeWork('zone transfer');
+    _scopeLifecycle.onEvent(ScopeStopEvent.zoneTransfer);
     _zoneTransferFrom = oldZoneCode;
     _zoneTransferTo = newZoneCode;
     _invalidateLiveSessionRecovery();
@@ -10555,31 +10564,23 @@ class AppStateProvider extends ChangeNotifier with WidgetsBindingObserver {
   /// Ruling 10: the connect-time repeater refresh for scope discovery. A
   /// list that lands after the zone or the radio preset moved is dropped.
   Future<void> _refreshRepeatersForScopes(String iata) async {
-    final filterKey = radioFilterKey;
     debugLog('[SCOPES] Refreshing the repeater list for zone $iata');
-    try {
-      final fetched = await _apiService.fetchRepeaters(iata);
-      if (!scopeRepeaterRefreshStillCurrent(
-          requestedZone: iata,
-          requestedFilterKey: filterKey,
-          currentZone: zoneCode,
-          currentFilterKey: radioFilterKey)) {
-        debugLog('[SCOPES] Repeater list for $iata discarded: the zone or '
-            'preset changed while it loaded');
-        return;
-      }
-      if (fetched.isEmpty) return;
-      _repeaters = rcComputeExclusions(fetched);
-      _repeaterConflictHexIds = rcConflictHexIds(_repeaters);
-      _siriRepeaterCatalogRevision++;
-      _repeatersLoaded = true;
-      _repeatersLoadedForIata = iata;
-      _repeatersLoadedAt = DateTime.now();
-      debugLog('[SCOPES] Repeater list refreshed (${_repeaters.length})');
-      _notifyMapNow();
-    } catch (e) {
-      debugWarn('[SCOPES] Repeater list refresh failed: $e');
-    }
+    final fetched = await _scopeLifecycle.resultIfStillCurrent(
+      fetch: _apiService.fetchRepeaters(iata),
+      zone: iata,
+      preset: radioFilterKey,
+      currentZone: () => zoneCode,
+      currentPreset: () => radioFilterKey,
+    );
+    if (fetched == null || fetched.isEmpty) return;
+    _repeaters = rcComputeExclusions(fetched);
+    _repeaterConflictHexIds = rcConflictHexIds(_repeaters);
+    _siriRepeaterCatalogRevision++;
+    _repeatersLoaded = true;
+    _repeatersLoadedForIata = iata;
+    _repeatersLoadedAt = DateTime.now();
+    debugLog('[SCOPES] Repeater list refreshed (${_repeaters.length})');
+    _notifyMapNow();
   }
 
   /// Builds one sweep's scope runner, or null when scope discovery is not
@@ -10587,44 +10588,43 @@ class AppStateProvider extends ChangeNotifier with WidgetsBindingObserver {
   ScopeRunner? _buildScopeRunner(
       {required DateTime hardStop, required ScopeCancelToken cancel}) {
     final connection = _meshCoreConnection;
-    if (connection == null || !scopeDiscoveryActive) return null;
-    final deviceKey = _devicePublicKey ?? _apiService.sessionId;
-    if (deviceKey == null) return null;
-    if (!identical(_scopePendingRestoresFor, connection)) {
-      _scopePendingRestores.clear();
-      _scopePendingRestoresFor = connection;
-    }
-    return ScopeRunner(
-      radio: MeshCoreScopeRadio(connection),
-      cancel: cancel,
-      hardStop: hardStop,
-      refreshDays: () => scopeRefreshDays,
-      deviceKey: () => _devicePublicKey ?? _apiService.sessionId ?? deviceKey,
-      sessionId: () => _apiService.sessionId,
-      queueGeneration: () => _apiQueueService.generation,
-      serverInfo: _scopeServerInfoFor,
-      cache: _scopeQueryCache,
-      budget: _scopeHourlyBudget,
-      enqueue: (answer, ctx) => _apiQueueService.enqueueScopes(
-        publicKeyHex: answer.keyHex,
-        scopes: answer.scopes,
-        lat: answer.lat,
-        lon: answer.lon,
-        timestamp: answer.timestampSec,
-        expectedGeneration: ctx.queueGeneration,
-        radioFreq: liveRadioConfig,
+    return _scopeLifecycle.buildRunner(
+      gate: _scopeGateInputs,
+      connection: connection,
+      deviceKey: _devicePublicKey ?? _apiService.sessionId,
+      create: (deviceKey, pendingRestores) => ScopeRunner(
+        radio: MeshCoreScopeRadio(connection!),
+        cancel: cancel,
+        hardStop: hardStop,
+        refreshDays: () => scopeRefreshDays,
+        deviceKey: () =>
+            _devicePublicKey ?? _apiService.sessionId ?? deviceKey,
+        sessionId: () => _apiService.sessionId,
+        queueGeneration: () => _apiQueueService.generation,
+        serverInfo: _scopeServerInfoFor,
+        cache: _scopeQueryCache,
+        budget: _scopeHourlyBudget,
+        enqueue: (answer, ctx) => _apiQueueService.enqueueScopes(
+          publicKeyHex: answer.keyHex,
+          scopes: answer.scopes,
+          lat: answer.lat,
+          lon: answer.lon,
+          timestamp: answer.timestampSec,
+          expectedGeneration: ctx.queueGeneration,
+          radioFreq: liveRadioConfig,
+        ),
+        onCacheStamped: () => unawaited(_scopeCacheWriter.schedule()),
+        nowSec: () => DateTime.now().millisecondsSinceEpoch ~/ 1000,
+        currentPosition: () {
+          final p = _currentPosition;
+          return p == null ? null : (lat: p.latitude, lon: p.longitude);
+        },
+        stillWanted: _scopeStillWanted,
+        onActiveChanged: _scopeLifecycle.setRequestActive,
+        // The log tab picks these up in a later change.
+        onLogged: (_) {},
+        pendingRestores: pendingRestores,
       ),
-      onCacheStamped: () => unawaited(_scopeCacheWriter.schedule()),
-      nowSec: () => DateTime.now().millisecondsSinceEpoch ~/ 1000,
-      currentPosition: () {
-        final p = _currentPosition;
-        return p == null ? null : (lat: p.latitude, lon: p.longitude);
-      },
-      stillWanted: _scopeStillWanted,
-      onActiveChanged: _setScopeRequestActive,
-      // The log tab picks these up in a later change.
-      onLogged: (_) {},
-      pendingRestores: _scopePendingRestores,
     );
   }
 
@@ -10647,24 +10647,6 @@ class AppStateProvider extends ChangeNotifier with WidgetsBindingObserver {
       _scopeServerInfoSource = _repeaters;
     }
     return scopeServerInfoFor(_scopeServerInfo, keyHex);
-  }
-
-  /// The Scopes badge. Plain notify: nothing here is on the map.
-  void _setScopeRequestActive(bool active) {
-    if (_isScopeRequestActive == active) return;
-    _isScopeRequestActive = active;
-    notifyListeners();
-  }
-
-  /// Stops any scope work at once. [dropRestores] forgets borrowed routes
-  /// with the connection they belong to.
-  void _cancelScopeWork(String reason, {bool dropRestores = false}) {
-    _pingService?.cancelScopeRunner(reason);
-    _setScopeRequestActive(false);
-    if (dropRestores) {
-      _scopePendingRestores.clear();
-      _scopePendingRestoresFor = null;
-    }
   }
 
   Future<void> _loadScopeDiscoveryState() async {
@@ -12433,7 +12415,7 @@ class AppStateProvider extends ChangeNotifier with WidgetsBindingObserver {
   @override
   void dispose() {
     _isDisposed = true;
-    _pingService?.cancelScopeRunner('disposed');
+    _scopeLifecycle.onEvent(ScopeStopEvent.dispose);
     _invalidateLiveSessionRecovery();
     // No notify in dispose: the session just has to let the radio go.
     _repeaterAdminSession?.close();

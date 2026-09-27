@@ -613,9 +613,10 @@ void main() {
     }
 
     stopsAtOnce('Stop', (s) => s.ping.disableAutoPing());
-    stopsAtOnce('force disable (airborne, disconnect, zone transfer)',
-        (s) => s.ping.forceDisableAutoPing());
-    stopsAtOnce('the provider (Offline switch, disconnect)',
+    stopsAtOnce('force disable', (s) => s.ping.forceDisableAutoPing());
+    // The provider's events reach PingService through this (see
+    // scope_lifecycle_test.dart for the events themselves).
+    stopsAtOnce('cancelScopeRunner',
         (s) => s.ping.cancelScopeRunner('offline switch'));
     stopsAtOnce('dispose', (s) => s.ping.dispose());
   });

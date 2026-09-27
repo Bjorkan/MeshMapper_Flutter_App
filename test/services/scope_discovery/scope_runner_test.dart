@@ -841,6 +841,37 @@ void main() {
       });
     });
 
+    test('a queue cleared during the answer wait: refused, nothing stamped',
+        () {
+      _run((async, h) {
+        // The real queue refuses a stale generation.
+        h.enqueueOverride = (a, ctx) async =>
+            ctx.queueGeneration == h.queueGeneration;
+        h.radio.scripts[_key(0x11)] =
+            _Script.answers('Ottawa', after: const Duration(seconds: 1));
+        _start(async, h.build(), [_cand(0x11)]);
+        async.elapse(const Duration(milliseconds: 500)); // in the wait
+        h.queueGeneration++; // the queue (and the sweep's DISC) is cleared
+        async.elapse(const Duration(seconds: 10));
+        expect(h.logged.single.outcome, ScopeLogOutcome.answered);
+        expect(h.cache[_key(0x11)], isNull,
+            reason: 'the answer belongs to the sweep that was cleared');
+        expect(h.cacheSaves, 0);
+      });
+    });
+
+    test('every answer of a sweep carries the generation from its start', () {
+      _run((async, h) {
+        h.radio.scripts[_key(0x11)] = _Script.answers('A');
+        h.radio.scripts[_key(0x22)] = _Script.answers('B');
+        _start(async, h.build(), [_cand(0x11, rssi: -50), _cand(0x22)]);
+        async.elapse(const Duration(milliseconds: 50));
+        h.queueGeneration = 7;
+        async.elapse(const Duration(seconds: 20));
+        expect(h.enqueued.map((e) => e.ctx.queueGeneration), [1, 1]);
+      });
+    });
+
     test(
         'an enqueue landing after a newer runner started stamps the cache and '
         'touches nothing else', () {

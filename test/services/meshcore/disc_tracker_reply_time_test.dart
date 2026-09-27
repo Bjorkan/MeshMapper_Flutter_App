@@ -73,6 +73,46 @@ void main() {
     });
   });
 
+  test('one-byte ids shared by two keys never share a reply time', () {
+    Uint8List reply(List<int> tag, int second, {required bool own}) =>
+        Uint8List.fromList([
+          0,
+          DiscoveryConstants.discoverRespFlag |
+              DiscoveryConstants.nodeTypeRepeater,
+          20,
+          ...tag,
+          0xAA,
+          second,
+          ...List<int>.filled(30, 0x33),
+        ]);
+    fakeAsync((async) {
+      // Own AA01 first, then a stronger foreign AA02 replaces it.
+      final tracker = DiscTracker(hopBytes: 1);
+      tracker.startTracking(
+          tag: Uint8List.fromList(own), sentAt: clock.now());
+      async.elapse(const Duration(milliseconds: 400));
+      tracker.handlePacket(reply(own, 0x01, own: true), 2, -80);
+      async.elapse(const Duration(milliseconds: 400));
+      tracker.handlePacket(reply(foreign, 0x02, own: false), 9, -80);
+      final node = tracker.stopTracking().single;
+      expect(node.pubkeyFull.substring(0, 4), 'AA02');
+      expect(node.discoveryReplyAfter, isNull);
+    });
+    fakeAsync((async) {
+      // Foreign AA02 first, then a weaker own AA01: no timing copied over.
+      final tracker = DiscTracker(hopBytes: 1);
+      tracker.startTracking(
+          tag: Uint8List.fromList(own), sentAt: clock.now());
+      async.elapse(const Duration(milliseconds: 400));
+      tracker.handlePacket(reply(foreign, 0x02, own: false), 9, -80);
+      async.elapse(const Duration(milliseconds: 400));
+      tracker.handlePacket(reply(own, 0x01, own: true), 2, -80);
+      final node = tracker.stopTracking().single;
+      expect(node.pubkeyFull.substring(0, 4), 'AA02');
+      expect(node.discoveryReplyAfter, isNull);
+    });
+  });
+
   test('no sentAt: no reply times at all', () {
     fakeAsync((async) {
       final tracker = DiscTracker(hopBytes: 1);
