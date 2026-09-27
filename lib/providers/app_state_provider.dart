@@ -27,6 +27,7 @@ import '../models/repeater.dart';
 import '../models/user_preferences.dart';
 import '../services/airborne_release.dart';
 import '../services/api_queue_service.dart';
+import '../utils/coverage_refresh.dart';
 import '../utils/mvt_cells.dart';
 import '../services/api_service.dart';
 import '../services/audio_service.dart';
@@ -3457,16 +3458,14 @@ class AppStateProvider extends ChangeNotifier with WidgetsBindingObserver {
       if (_vectorOverlayActive) {
         // Queue the batch's coords for the +7s fresh-tile check; the user's
         // own cells land on the map via the session patch (see
-        // _freshenAffectedVectorTiles). A DEFER changes no tile (the server
-        // keeps deferrals in a table nothing renders), so it is left out and
-        // a batch of nothing but deferrals arms nothing.
-        final hasCoverageRows = uploadedItems.any((i) => i.type != 'DEFER');
-        for (final item in uploadedItems) {
-          if (item.type == 'DEFER') continue;
-          if (_pendingFreshCoords.length >= 16) break;
-          _pendingFreshCoords.add([item.latitude, item.longitude]);
-        }
-        if (hasCoverageRows) {
+        // _freshenAffectedVectorTiles). A DEFER or a SCOPES changes no tile
+        // (see changesCoverage), so each is left out and a batch of nothing
+        // but those arms nothing: a SCOPES uploaded after its DISC used to
+        // schedule a second refresh, retry included, for unchanged tiles.
+        final refresh = coverageRefreshFor(uploadedItems,
+            alreadyPending: _pendingFreshCoords.length);
+        _pendingFreshCoords.addAll(refresh.coords);
+        if (refresh.armsRefresh) {
           _pendingFreshZone = zoneCode;
           _vectorFreshTimer?.cancel();
           _vectorFreshTimer = Timer(const Duration(seconds: 7), () {
