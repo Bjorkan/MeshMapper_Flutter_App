@@ -35,6 +35,23 @@ bool scopeRepeaterRefreshDue(
   return now.difference(loadedAt) >= kScopeRepeaterListMaxAge;
 }
 
+/// Whether replacing [before] with [after] changes anything the map draws.
+///
+/// Every repeater field reaches the map (its marker, its colour, its detail
+/// sheet) except the server's scope stamp, so the lists are compared field
+/// for field, in order, with `scopes_checked_at` left out. A refresh that
+/// only moved scope stamps must not bump the map revision.
+bool scopeRefreshChangesMap(List<Repeater> before, List<Repeater> after) {
+  if (before.length != after.length) return true;
+  for (var i = 0; i < before.length; i++) {
+    if (_renderedJson(before[i]) != _renderedJson(after[i])) return true;
+  }
+  return false;
+}
+
+String _renderedJson(Repeater r) =>
+    jsonEncode(r.toJson()..remove('scopes_checked_at'));
+
 /// Whether a repeater list fetched for [requestedZone] under
 /// [requestedFilterKey] may still be applied: neither the zone nor the
 /// radio preset moved while it was in flight.

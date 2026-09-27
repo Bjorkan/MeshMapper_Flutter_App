@@ -954,10 +954,23 @@ class MeshCoreConnection {
     // A RESP_SIGNATURE payload is 64 bytes of Ed25519 signature over the
     // portal's login nonce, and debug logs are uploadable to the bug-report
     // endpoint — so this one frame is logged by length only, never as hex.
+    // A CONTACT reply (a contact list stream, a scope lookup) and a new
+    // advert push open with a full 32-byte public key, and keys are logged by
+    // their 8-hex prefix only: the key past its first 4 bytes is redacted.
     // Every other frame keeps the full hexdump.
-    final frameDump = frame[0] == ResponseCodes.signature
-        ? 'SIGNATURE payload redacted'
-        : _hexDump(frame);
+    final String frameDump;
+    if (frame[0] == ResponseCodes.signature) {
+      frameDump = 'SIGNATURE payload redacted';
+    } else if ((frame[0] == ResponseCodes.contact ||
+            frame[0] == PushCodes.newAdvert) &&
+        frame.length > 5) {
+      final keyEnd = frame.length < 33 ? frame.length : 33;
+      frameDump = '${_hexDump(Uint8List.sublistView(frame, 0, 5))} '
+          '[key redacted]'
+          '${keyEnd < frame.length ? ' ${_hexDump(Uint8List.sublistView(frame, keyEnd))}' : ''}';
+    } else {
+      frameDump = _hexDump(frame);
+    }
 
     try {
       final reader = BufferReader(frame);

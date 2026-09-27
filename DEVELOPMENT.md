@@ -654,7 +654,10 @@ Off by default until a region turns it on.
   never in parallel. A TX or discovery ping is a different matter: while the short-lived radio
   lease actually holds the radio (below), another write simply waits its turn at the same gate
   a sign write parks other writers behind, so nothing is lost, only delayed by at most the
-  lease's own hold. Once the lease releases and the runner is only listening for the tagged
+  lease's own hold. A TX that waits there arms its echo tracking, creates its log record and
+  takes its send time only once its frame is past the gate, just before the transport write
+  (`MeshCoreConnection.sendPing`'s `onWire`), so the wait never eats into its listening window
+  and an echo is still never missed. Once the lease releases and the runner is only listening for the tagged
   answer, a ping can go out and come back without touching that listen at all, since only a
   frame carrying the answer's own tag ends it early: nothing else in flight ever clears it.
 
@@ -662,10 +665,13 @@ Off by default until a region turns it on.
   a scope ask can never indefinitely delay a ping or a repeater-admin command, or the reverse.
   **Admission** is granted only in one synchronous step, with nothing else already holding the
   radio: no sign in progress or waiting, no admin session open, the contact stream idle, and
-  the connection's reply ledger completely clear, meaning every earlier command already
-  accounted for exactly one owed reply (`getContacts` opens a stream instead of one; self
-  telemetry and a reboot, factory reset or CLI reboot owe none), so a lease is never granted
-  while anything is still owed an answer. **The write gate**: exactly as a `CMD_SIGN_DATA`
+  the connection's reply ledger completely clear, meaning every reply an earlier command owes
+  has come back. Most commands owe exactly one reply frame. `getContacts` owes its initial
+  reply (`CONTACTS_START`, or an ERR) like any other command and then opens a stream tracked on
+  its own, which must also have ended. A self telemetry request owes one reply too, but that
+  reply is the telemetry push 0x8B rather than a frame below 0x80. A reboot, factory reset or
+  CLI reboot owes none, since the radio goes away. So a lease is never granted while anything
+  is still owed an answer. **The write gate**: exactly as a `CMD_SIGN_DATA`
   write queues every other write behind `_signGate` (see MyMeshMapper Account), a granted lease
   opens its own gate the same way: every OTHER write queues behind it and goes out once the
   lease releases, while the lease's own commands skip that queue and go straight to the
@@ -726,11 +732,17 @@ Off by default until a region turns it on.
   (about to reuse the radio), a newer sweep superseding an older one, Stop (parked behind an
   in-flight TX, or immediate), force disable, the airborne block, an Offline Mode switch in
   either direction, a zone transfer, user disconnect, the full disconnect cleanup,
-  auto-reconnect, and provider disposal (`ScopeStopEvent` in
+  auto-reconnect, provider disposal, and the gate closing while a request runs (a live `/auth`
+  answer, a session recovery's included, that drops or disables `scope_discovery`, or the user
+  switching the feature off; `ApiService.onScopeDiscoveryChanged` and
+  `ScopeLifecycle.onGateChanged`) (`ScopeStopEvent` in
   `lib/services/scope_discovery/scope_lifecycle.dart`). Every one of these cancels the
   runner's token at once (no further frame goes out for it), releases a held lease
-  synchronously, and clears the badge; a connection actually going away also drops any route
-  still owed a restore, since the radio forgets it anyway on reconnect.
+  synchronously, and clears the badge. A connection actually going away also drops its list of
+  routes still owed a restore (the per-connection `pendingRestores`), and nothing restores them
+  on reconnect. **An accepted residual**: a disconnect between the borrow and its restore can
+  leave the borrowed zero-hop route on the radio until firmware relearns a path to that
+  repeater.
 
 - **The "Scopes" badge**: a small pill on the Passive and Hybrid ping buttons only (never
   Active or Trace, neither of which runs a discovery) while a request is out

@@ -485,7 +485,8 @@ class _AllPingsTabState extends State<AllPingsTab> {
                       widget.traceCount, PingColors.traceSuccess),
                   _segmentDivider(context),
                   _buildFilterSegment(PingLogType.scopes, 'SCP',
-                      widget.scopeCount, PingColors.scopes,
+                      widget.scopeCount,
+                      PingColors.scopesFor(Theme.of(context).brightness),
                       isLast: true),
                 ],
               ),
@@ -572,13 +573,13 @@ class _AllPingsTabState extends State<AllPingsTab> {
   // Type badge
   // ---------------------------------------------------------------------------
 
-  static Widget _buildTypeBadge(PingLogType type) {
+  static Widget _buildTypeBadge(PingLogType type, Brightness brightness) {
     final (label, color) = switch (type) {
       PingLogType.tx => ('TX', PingColors.txSuccess),
       PingLogType.rx => ('RX', PingColors.rx),
       PingLogType.disc => ('DISC', PingColors.discSuccess),
       PingLogType.trace => ('TRC', PingColors.traceSuccess),
-      PingLogType.scopes => ('SCP', PingColors.scopes),
+      PingLogType.scopes => ('SCP', PingColors.scopesFor(brightness)),
     };
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
@@ -1301,7 +1302,7 @@ class _AllPingsTabState extends State<AllPingsTab> {
       {bool showAmbiguity = false}) {
     return Row(
       children: [
-        _buildTypeBadge(type),
+        _buildTypeBadge(type, Theme.of(context).brightness),
         if (showAmbiguity) ...[
           const SizedBox(width: 2),
           Tooltip(
@@ -1617,8 +1618,8 @@ class ScopeLogCard extends StatelessWidget {
                     spacing: 6,
                     runSpacing: 6,
                     children: scopes
-                        .map((name) => _AllPingsTabState._buildChip(
-                            name, PingColors.scopes))
+                        .map((name) => _AllPingsTabState._buildChip(name,
+                            PingColors.scopesFor(Theme.of(context).brightness)))
                         .toList(),
                   ),
               ],

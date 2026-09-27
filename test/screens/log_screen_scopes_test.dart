@@ -283,6 +283,21 @@ void main() {
       expect(find.text('AB'), findsOneWidget);
     });
 
+    for (final brightness in Brightness.values) {
+      testWidgets(
+          'the SCP label and scope chips use the ${brightness.name} ink',
+          (tester) async {
+        final entry = _entry(scopes: const ['Ottawa']);
+        await tester.pumpWidget(MaterialApp(
+          theme: ThemeData(brightness: brightness),
+          home: Scaffold(body: ScopeLogCard(entry: entry, onTap: () {})),
+        ));
+        final ink = PingColors.scopesFor(brightness);
+        expect(tester.widget<Text>(find.text('SCP')).style?.color, ink);
+        expect(tester.widget<Text>(find.text('Ottawa')).style?.color, ink);
+      });
+    }
+
     testWidgets('an answered card shows its scope names exactly, case kept',
         (tester) async {
       final entry = _entry(scopes: const ['Ottawa', '*', 'west']);

@@ -16,6 +16,40 @@ Repeater _repeater(String hex, {int? checkedAt}) => Repeater.fromJson({
     });
 
 void main() {
+  group('whether a scope refresh changes the map', () {
+    test('only the scope stamps moved: no change', () {
+      expect(
+          scopeRefreshChangesMap(
+              [_repeater('ab' * 32), _repeater('cd' * 32, checkedAt: 1)],
+              [
+                _repeater('ab' * 32, checkedAt: 1790000000),
+                _repeater('cd' * 32, checkedAt: 2),
+              ]),
+          isFalse);
+    });
+
+    test('a rendered field moved: changed', () {
+      final before = [_repeater('ab' * 32)];
+      expect(
+          scopeRefreshChangesMap(
+              before, [before.single.copyWith(lastHeard: 1790000000)]),
+          isTrue);
+      expect(scopeRefreshChangesMap(before, [before.single.copyWith(enabled: 2)]),
+          isTrue);
+      expect(scopeRefreshChangesMap(before, [before.single.copyWith(lat: 3.0)]),
+          isTrue);
+    });
+
+    test('a repeater added, dropped or reordered: changed', () {
+      final a = _repeater('ab' * 32);
+      final b = _repeater('cd' * 32);
+      expect(scopeRefreshChangesMap([a], [a, b]), isTrue);
+      expect(scopeRefreshChangesMap([a, b], [a]), isTrue);
+      expect(scopeRefreshChangesMap([a, b], [b, a]), isTrue);
+      expect(scopeRefreshChangesMap(const [], [a]), isTrue);
+    });
+  });
+
   group('server info map', () {
     test('keys are upper-case full keys; short ids are left out', () {
       final map = scopeServerInfoMap([

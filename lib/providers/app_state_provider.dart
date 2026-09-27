@@ -10587,14 +10587,25 @@ class AppStateProvider extends ChangeNotifier with WidgetsBindingObserver {
       currentPreset: () => radioFilterKey,
     );
     if (fetched == null || fetched.isEmpty) return;
-    _repeaters = rcComputeExclusions(fetched);
+    final refreshed = rcComputeExclusions(fetched);
+    // Wanted for its scope stamps: when nothing the map draws moved, the
+    // map is not rebuilt for it (Rule 9).
+    final mapChanged = !_repeatersLoaded ||
+        _repeatersLoadedForIata != iata ||
+        scopeRefreshChangesMap(_repeaters, refreshed);
+    _repeaters = refreshed;
     _repeaterConflictHexIds = rcConflictHexIds(_repeaters);
     _siriRepeaterCatalogRevision++;
     _repeatersLoaded = true;
     _repeatersLoadedForIata = iata;
     _repeatersLoadedAt = DateTime.now();
-    debugLog('[SCOPES] Repeater list refreshed (${_repeaters.length})');
-    _notifyMapNow();
+    debugLog('[SCOPES] Repeater list refreshed (${_repeaters.length}'
+        '${mapChanged ? '' : ', nothing on the map changed'})');
+    if (mapChanged) {
+      _notifyMapNow();
+    } else {
+      notifyListeners();
+    }
   }
 
   /// Builds one sweep's scope runner, or null when scope discovery is not
