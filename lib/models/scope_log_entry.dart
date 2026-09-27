@@ -66,4 +66,25 @@ class ScopeLogEntry {
     required this.outcome,
     this.scopes,
   });
+
+  /// Get formatted timestamp (HH:MM:SS)
+  String get timeString {
+    return '${timestamp.hour.toString().padLeft(2, '0')}:'
+        '${timestamp.minute.toString().padLeft(2, '0')}:'
+        '${timestamp.second.toString().padLeft(2, '0')}';
+  }
+
+  /// Get formatted location (5 decimal places)
+  String get locationString {
+    return '${latitude.toStringAsFixed(5)},${longitude.toStringAsFixed(5)}';
+  }
+
+  /// Get CSV row: timestamp, lat, lon, repeater id, outcome (raw enum name),
+  /// then the scope names semicolon-joined in one quoted field (empty when
+  /// [scopes] is null or carries none).
+  String toCsv() {
+    final scopesStr = (scopes ?? const <String>[]).join(';');
+    return '${timestamp.toIso8601String()},$latitude,$longitude,$repeaterId,'
+        '${outcome.name},"$scopesStr"';
+  }
 }

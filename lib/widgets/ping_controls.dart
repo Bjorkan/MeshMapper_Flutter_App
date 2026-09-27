@@ -9,6 +9,7 @@ import '../services/repeater_admin/manage_target.dart';
 import '../services/repeater_admin/repeater_admin_models.dart';
 import '../services/status/ping_control_labels.dart';
 import '../utils/debug_logger_io.dart';
+import '../utils/ping_colors.dart';
 import 'repeater_admin_sheet.dart';
 import 'repeater_picker_sheet.dart';
 
@@ -99,8 +100,8 @@ String scopesBadgeSemanticsLabel(String label, bool active) =>
 
 /// The small "Scopes" pill itself. Purely presentational: every caller
 /// decides whether to show it and where to position it (each button's own
-/// corner). Colour is the discovery accent for now; Task 8 swaps it for
-/// `PingColors.scopes`.
+/// corner). Colour is `PingColors.scopes`, the same accent the log tab's SCP
+/// entries use.
 class ScopesBadge extends StatelessWidget {
   const ScopesBadge({super.key});
 
@@ -109,7 +110,7 @@ class ScopesBadge extends StatelessWidget {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
       decoration: BoxDecoration(
-        color: const Color(0xFF51D4E9),
+        color: PingColors.scopes,
         borderRadius: BorderRadius.circular(8),
       ),
       child: const Text(

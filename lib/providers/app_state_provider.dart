@@ -22,6 +22,7 @@ import '../models/onboarding_guide_progress.dart';
 import '../models/ping_data.dart';
 import '../models/log_entry.dart';
 import '../models/remembered_device.dart';
+import '../models/scope_log_entry.dart';
 import '../models/repeater.dart';
 import '../models/user_preferences.dart';
 import '../services/airborne_release.dart';
@@ -400,6 +401,7 @@ class AppStateProvider extends ChangeNotifier with WidgetsBindingObserver {
   final List<RxLogEntry> _rxLogEntries = [];
   final List<DiscLogEntry> _discLogEntries = [];
   final List<TraceLogEntry> _traceLogEntries = [];
+  final List<ScopeLogEntry> _scopeLogEntries = [];
   final List<PingEventMarker> _deferredPingMarkers = [];
   final List<PingEventMarker> _startingDeferredHistory = [];
 
@@ -1229,22 +1231,17 @@ class AppStateProvider extends ChangeNotifier with WidgetsBindingObserver {
   List<DiscLogEntry> get discLogEntries => List.unmodifiable(_discLogEntries);
   List<TraceLogEntry> get traceLogEntries =>
       List.unmodifiable(_traceLogEntries);
+  List<ScopeLogEntry> get scopeLogEntries =>
+      List.unmodifiable(_scopeLogEntries);
   List<UserErrorEntry> get errorLogEntries =>
       List.unmodifiable(_errorLogEntries);
-  List<UnifiedPingLogEntry> get unifiedPingLogEntries {
-    final merged = <UnifiedPingLogEntry>[
-      ..._txLogEntries.map((e) => UnifiedPingLogEntry(
-          type: PingLogType.tx, timestamp: e.timestamp, entry: e)),
-      ..._rxLogEntries.map((e) => UnifiedPingLogEntry(
-          type: PingLogType.rx, timestamp: e.timestamp, entry: e)),
-      ..._discLogEntries.map((e) => UnifiedPingLogEntry(
-          type: PingLogType.disc, timestamp: e.timestamp, entry: e)),
-      ..._traceLogEntries.map((e) => UnifiedPingLogEntry(
-          type: PingLogType.trace, timestamp: e.timestamp, entry: e)),
-    ];
-    merged.sort();
-    return merged;
-  }
+  List<UnifiedPingLogEntry> get unifiedPingLogEntries => mergeUnifiedPingLog(
+        tx: _txLogEntries,
+        rx: _rxLogEntries,
+        disc: _discLogEntries,
+        trace: _traceLogEntries,
+        scopes: _scopeLogEntries,
+      );
 
   ({double lat, double lon})? get mapNavigationTarget => _mapNavigationTarget;
   int get mapNavigationTrigger => _mapNavigationTrigger;
@@ -7899,6 +7896,7 @@ class AppStateProvider extends ChangeNotifier with WidgetsBindingObserver {
     _rxPings.clear();
     _discLogEntries.clear();
     _traceLogEntries.clear();
+    _scopeLogEntries.clear();
     _deferredPingMarkers.clear();
     _lastDeferredMarkerLat = null;
     _lastDeferredMarkerLon = null;
@@ -7914,6 +7912,7 @@ class AppStateProvider extends ChangeNotifier with WidgetsBindingObserver {
     _rxLogEntries.clear();
     _discLogEntries.clear();
     _traceLogEntries.clear();
+    _scopeLogEntries.clear();
     _deferredPingMarkers.clear();
     _lastDeferredMarkerLat = null;
     _lastDeferredMarkerLon = null;
@@ -7948,6 +7947,15 @@ class AppStateProvider extends ChangeNotifier with WidgetsBindingObserver {
     // The entry arrives unfinished; the Top Heard box learns the target when
     // the window closes, in onTraceWindowComplete.
     _notifyMapNow();
+  }
+
+  /// Add a scope request log entry (from a Passive/Hybrid Mode sweep).
+  /// Nothing here is on the map (Critical Rule 9), so this stays a plain
+  /// notify, never `_notifyMapNow`.
+  void _addScopeLogEntry(ScopeLogEntry entry) {
+    insertCappedNewestFirst(_scopeLogEntries, entry, _maxLogEntries);
+    debugLog('[SCOPES] Log entry added: outcome=${entry.outcome.name}');
+    notifyListeners();
   }
 
   /// Log a user-facing error message
@@ -10621,8 +10629,7 @@ class AppStateProvider extends ChangeNotifier with WidgetsBindingObserver {
         },
         stillWanted: _scopeStillWanted,
         onActiveChanged: _scopeLifecycle.setRequestActive,
-        // The log tab picks these up in a later change.
-        onLogged: (_) {},
+        onLogged: _addScopeLogEntry,
         pendingRestores: pendingRestores,
       ),
     );

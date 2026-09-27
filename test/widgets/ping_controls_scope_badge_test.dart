@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:mesh_mapper/providers/app_state_provider.dart' show AutoMode;
+import 'package:mesh_mapper/utils/ping_colors.dart';
 import 'package:mesh_mapper/widgets/ping_controls.dart';
 
 /// The "Scopes" badge (owner ruling 15): a small pill at the corner of the
@@ -115,7 +116,7 @@ void main() {
   });
 
   group('ScopesBadge widget', () {
-    testWidgets('renders the pill text in the discovery accent color',
+    testWidgets('renders the pill text in the PingColors.scopes accent',
         (tester) async {
       await tester.pumpWidget(const MaterialApp(
         home: Scaffold(body: ScopesBadge()),
@@ -130,7 +131,7 @@ void main() {
         ),
       );
       final decoration = container.decoration as BoxDecoration;
-      expect(decoration.color, const Color(0xFF51D4E9));
+      expect(decoration.color, PingColors.scopes);
     });
   });
 

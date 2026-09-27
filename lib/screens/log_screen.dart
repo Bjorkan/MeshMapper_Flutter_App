@@ -4,6 +4,7 @@ import 'package:provider/provider.dart';
 
 import '../models/log_entry.dart';
 import '../models/repeater.dart';
+import '../models/scope_log_entry.dart';
 import '../providers/app_state_provider.dart';
 import '../utils/ping_colors.dart';
 import '../widgets/log_table_cell_fit.dart';
@@ -53,7 +54,8 @@ class _LogScreenState extends State<LogScreen>
     final totalPings = appState.txLogEntries.length +
         appState.rxLogEntries.length +
         appState.discLogEntries.length +
-        appState.traceLogEntries.length;
+        appState.traceLogEntries.length +
+        appState.scopeLogEntries.length;
 
     final errorCount = appState.errorLogEntries.length;
 
@@ -105,6 +107,7 @@ class _LogScreenState extends State<LogScreen>
             rxCount: appState.rxLogEntries.length,
             discCount: appState.discLogEntries.length,
             traceCount: appState.traceLogEntries.length,
+            scopeCount: appState.scopeLogEntries.length,
           ),
           _ErrorLogTab(entries: appState.errorLogEntries),
         ],
@@ -153,8 +156,13 @@ class _LogScreenState extends State<LogScreen>
     final rx = appState.rxLogEntries;
     final disc = appState.discLogEntries;
     final trace = appState.traceLogEntries;
+    final scopes = appState.scopeLogEntries;
 
-    if (tx.isEmpty && rx.isEmpty && disc.isEmpty && trace.isEmpty) {
+    if (tx.isEmpty &&
+        rx.isEmpty &&
+        disc.isEmpty &&
+        trace.isEmpty &&
+        scopes.isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
             content: Text('No ping log entries to copy'),
@@ -201,6 +209,15 @@ class _LogScreenState extends State<LogScreen>
       for (final entry in trace) {
         buffer.writeln(entry.toCsv());
       }
+      buffer.writeln();
+    }
+
+    if (scopes.isNotEmpty) {
+      buffer.writeln('--- SCP Log ---');
+      buffer.writeln('timestamp,latitude,longitude,repeater_id,outcome,scopes');
+      for (final entry in scopes) {
+        buffer.writeln(entry.toCsv());
+      }
     }
 
     Clipboard.setData(ClipboardData(text: buffer.toString()));
@@ -239,8 +256,8 @@ class _LogScreenState extends State<LogScreen>
       context: context,
       builder: (context) => AlertDialog(
         title: const Text('Clear All Logs?'),
-        content:
-            const Text('This will clear TX, RX, DISC, TRC, and error logs.'),
+        content: const Text(
+            'This will clear TX, RX, DISC, TRC, SCP, and error logs.'),
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(context),
@@ -270,6 +287,7 @@ class _AllPingsTab extends StatefulWidget {
   final int rxCount;
   final int discCount;
   final int traceCount;
+  final int scopeCount;
 
   const _AllPingsTab({
     super.key,
@@ -279,6 +297,7 @@ class _AllPingsTab extends StatefulWidget {
     required this.rxCount,
     required this.discCount,
     required this.traceCount,
+    required this.scopeCount,
   });
 
   @override
@@ -291,6 +310,7 @@ class _AllPingsTabState extends State<_AllPingsTab> {
     PingLogType.rx,
     PingLogType.disc,
     PingLogType.trace,
+    PingLogType.scopes,
   };
 
   String _searchQuery = '';
@@ -389,6 +409,8 @@ class _AllPingsTabState extends State<_AllPingsTab> {
         final resolved =
             _resolveRepeaterNames(trace.targetRepeaterId, repeaters);
         return resolved.names.any((n) => n.toLowerCase().contains(query));
+      case PingLogType.scopes:
+        return scopeEntryMatchesSearch(entry.asScopes, _searchQuery);
     }
   }
 
@@ -409,13 +431,14 @@ class _AllPingsTabState extends State<_AllPingsTab> {
             .any((n) => _isAmbiguousId(n.repeaterId, repeaters));
       case PingLogType.trace:
         return _isAmbiguousId(entry.asTrace.targetRepeaterId, repeaters);
+      case PingLogType.scopes:
+        return false;
     }
   }
 
   @override
   Widget build(BuildContext context) {
-    final filtered = widget.allEntries
-        .where((e) => _activeFilters.contains(e.type))
+    final filtered = filterUnifiedPingLog(widget.allEntries, _activeFilters)
         .where((e) => _matchesSearch(e, widget.repeaters))
         .toList();
     _filteredEntries = filtered;
@@ -498,7 +521,10 @@ class _AllPingsTabState extends State<_AllPingsTab> {
                       widget.discCount, PingColors.discSuccess),
                   _segmentDivider(context),
                   _buildFilterSegment(PingLogType.trace, 'TRC',
-                      widget.traceCount, PingColors.traceSuccess,
+                      widget.traceCount, PingColors.traceSuccess),
+                  _segmentDivider(context),
+                  _buildFilterSegment(PingLogType.scopes, 'SCP',
+                      widget.scopeCount, PingColors.scopes,
                       isLast: true),
                 ],
               ),
@@ -547,6 +573,9 @@ class _AllPingsTabState extends State<_AllPingsTab> {
                       PingLogType.trace => _buildTraceCard(
                           context, unified.asTrace,
                           showAmbiguity: showAmbiguity),
+                      PingLogType.scopes => _buildScopeCard(
+                          context, unified.asScopes,
+                          showAmbiguity: showAmbiguity),
                     };
                   },
                 ),
@@ -558,61 +587,15 @@ class _AllPingsTabState extends State<_AllPingsTab> {
   Widget _buildFilterSegment(
       PingLogType type, String label, int count, Color color,
       {bool isFirst = false, bool isLast = false}) {
-    final active = _activeFilters.contains(type);
-    return Expanded(
-      child: GestureDetector(
-        onTap: () => _toggleFilter(type),
-        child: Container(
-          padding: const EdgeInsets.symmetric(vertical: 7),
-          color: active ? color.withValues(alpha: 0.12) : Colors.transparent,
-          child: Row(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: [
-              Text(
-                label,
-                style: TextStyle(
-                  fontSize: 13,
-                  fontWeight: active ? FontWeight.w600 : FontWeight.w500,
-                  color: active
-                      ? color
-                      : Theme.of(context)
-                          .colorScheme
-                          .onSurfaceVariant
-                          .withValues(alpha: 0.6),
-                ),
-              ),
-              if (count > 0) ...[
-                const SizedBox(width: 4),
-                Container(
-                  constraints:
-                      const BoxConstraints(minWidth: 18, minHeight: 16),
-                  padding:
-                      const EdgeInsets.symmetric(horizontal: 5, vertical: 2),
-                  decoration: BoxDecoration(
-                    color: active
-                        ? color
-                        : Theme.of(context)
-                            .colorScheme
-                            .onSurfaceVariant
-                            .withValues(alpha: 0.3),
-                    borderRadius: BorderRadius.circular(8),
-                  ),
-                  alignment: Alignment.center,
-                  child: Text(
-                    count > 99 ? '99+' : count.toString(),
-                    style: const TextStyle(
-                      fontSize: 10,
-                      fontWeight: FontWeight.bold,
-                      color: Colors.white,
-                      height: 1.0,
-                    ),
-                  ),
-                ),
-              ],
-            ],
-          ),
-        ),
-      ),
+    return LogFilterSegment(
+      type: type,
+      label: label,
+      count: count,
+      color: color,
+      active: _activeFilters.contains(type),
+      onTap: () => _toggleFilter(type),
+      isFirst: isFirst,
+      isLast: isLast,
     );
   }
 
@@ -634,6 +617,7 @@ class _AllPingsTabState extends State<_AllPingsTab> {
       PingLogType.rx => ('RX', PingColors.rx),
       PingLogType.disc => ('DISC', PingColors.discSuccess),
       PingLogType.trace => ('TRC', PingColors.traceSuccess),
+      PingLogType.scopes => ('SCP', PingColors.scopes),
     };
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
@@ -1329,6 +1313,21 @@ class _AllPingsTabState extends State<_AllPingsTab> {
   }
 
   // ---------------------------------------------------------------------------
+  // SCP Card
+  // ---------------------------------------------------------------------------
+
+  Widget _buildScopeCard(BuildContext context, ScopeLogEntry entry,
+      {bool showAmbiguity = false}) {
+    final appState = context.read<AppStateProvider>();
+    return ScopeLogCard(
+      entry: entry,
+      showAmbiguity: showAmbiguity,
+      onTap: () =>
+          appState.navigateToMapCoordinates(entry.latitude, entry.longitude),
+    );
+  }
+
+  // ---------------------------------------------------------------------------
   // Shared helpers
   // ---------------------------------------------------------------------------
 
@@ -1404,6 +1403,197 @@ class _AllPingsTabState extends State<_AllPingsTab> {
   static Color _rssiColor(int? rssi) {
     if (rssi == null) return Colors.grey;
     return PingColors.rssiColor(rssi);
+  }
+}
+
+// =============================================================================
+// Filter/search helpers usable without a live AppStateProvider
+// =============================================================================
+
+/// The entries in [entries] whose type is in [activeFilters], in the same
+/// order. What toggling a segment on the filter row does to the list.
+List<UnifiedPingLogEntry> filterUnifiedPingLog(
+        List<UnifiedPingLogEntry> entries, Set<PingLogType> activeFilters) =>
+    entries.where((e) => activeFilters.contains(e.type)).toList();
+
+/// Whether a logged scope request matches [query]: the repeater id and the
+/// outcome words case-insensitively, a scope name case-sensitively (scope
+/// names are case-sensitive on the mesh). An empty query always matches.
+bool scopeEntryMatchesSearch(ScopeLogEntry entry, String query) {
+  if (query.isEmpty) return true;
+  final lower = query.toLowerCase();
+  if (entry.repeaterId.toLowerCase().startsWith(lower)) return true;
+  if ((entry.scopes ?? const <String>[]).any((name) => name.contains(query))) {
+    return true;
+  }
+  return entry.outcome.label.toLowerCase().contains(lower);
+}
+
+// =============================================================================
+// SCP filter segment and card, Provider-free
+// =============================================================================
+
+/// One segment of the TX/RX/DISC/TRC/SCP filter row. Presentational only:
+/// [active] and [onTap] are owned by `_AllPingsTabState`, so this renders (and
+/// is testable) without a live `AppStateProvider`.
+class LogFilterSegment extends StatelessWidget {
+  final PingLogType type;
+  final String label;
+  final int count;
+  final Color color;
+  final bool active;
+  final VoidCallback onTap;
+  final bool isFirst;
+  final bool isLast;
+
+  const LogFilterSegment({
+    super.key,
+    required this.type,
+    required this.label,
+    required this.count,
+    required this.color,
+    required this.active,
+    required this.onTap,
+    this.isFirst = false,
+    this.isLast = false,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Expanded(
+      child: GestureDetector(
+        onTap: onTap,
+        child: Container(
+          padding: const EdgeInsets.symmetric(vertical: 7),
+          color: active ? color.withValues(alpha: 0.12) : Colors.transparent,
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              Text(
+                label,
+                style: TextStyle(
+                  fontSize: 13,
+                  fontWeight: active ? FontWeight.w600 : FontWeight.w500,
+                  color: active
+                      ? color
+                      : Theme.of(context)
+                          .colorScheme
+                          .onSurfaceVariant
+                          .withValues(alpha: 0.6),
+                ),
+              ),
+              if (count > 0) ...[
+                const SizedBox(width: 4),
+                Container(
+                  constraints:
+                      const BoxConstraints(minWidth: 18, minHeight: 16),
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 5, vertical: 2),
+                  decoration: BoxDecoration(
+                    color: active
+                        ? color
+                        : Theme.of(context)
+                            .colorScheme
+                            .onSurfaceVariant
+                            .withValues(alpha: 0.3),
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                  alignment: Alignment.center,
+                  child: Text(
+                    count > 99 ? '99+' : count.toString(),
+                    style: const TextStyle(
+                      fontSize: 10,
+                      fontWeight: FontWeight.bold,
+                      color: Colors.white,
+                      height: 1.0,
+                    ),
+                  ),
+                ),
+              ],
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// The SCP card for one logged scope request. Provider-free (unlike the other
+/// per-type card builders, which are private methods on `_AllPingsTabState`
+/// that read `context.read<AppStateProvider>()` themselves): the whole-card
+/// tap is handed in as [onTap] so this renders in a widget test without a
+/// live `AppStateProvider`. `_AllPingsTabState._buildScopeCard` supplies the
+/// same `navigateToMapCoordinates` tap every other card uses.
+class ScopeLogCard extends StatelessWidget {
+  final ScopeLogEntry entry;
+  final bool showAmbiguity;
+  final VoidCallback onTap;
+
+  const ScopeLogCard({
+    super.key,
+    required this.entry,
+    this.showAmbiguity = false,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final scopes = entry.scopes;
+    final colorScheme = Theme.of(context).colorScheme;
+    return Card(
+      margin: const EdgeInsets.only(bottom: 8),
+      color: colorScheme.surfaceContainerHigh,
+      child: InkWell(
+        onTap: onTap,
+        child: Padding(
+          padding: const EdgeInsets.all(12),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              _AllPingsTabState._buildCardHeader(context, PingLogType.scopes,
+                  entry.timeString, entry.locationString,
+                  showAmbiguity: showAmbiguity),
+              const SizedBox(height: 10),
+              InkWell(
+                onTap: () => RepeaterIdChip.showRepeaterPopup(
+                    context, entry.repeaterId,
+                    fullHexId: entry.pubkeyHex),
+                child: RepeaterIdChip(repeaterId: entry.repeaterId, fontSize: 14),
+              ),
+              const SizedBox(height: 8),
+              Text(
+                entry.outcome.label,
+                style: TextStyle(
+                  fontSize: 12,
+                  color: colorScheme.onSurfaceVariant,
+                ),
+              ),
+              if (scopes != null) ...[
+                const SizedBox(height: 8),
+                if (scopes.isEmpty)
+                  Text(
+                    'Carries no scopes',
+                    style: TextStyle(
+                      fontSize: 12,
+                      fontStyle: FontStyle.italic,
+                      color: colorScheme.onSurfaceVariant,
+                    ),
+                  )
+                else
+                  Wrap(
+                    spacing: 6,
+                    runSpacing: 6,
+                    children: scopes
+                        .map((name) =>
+                            _AllPingsTabState._buildChip(name, PingColors.scopes))
+                        .toList(),
+                  ),
+              ],
+            ],
+          ),
+        ),
+      ),
+    );
   }
 }
 

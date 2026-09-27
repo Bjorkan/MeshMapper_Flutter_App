@@ -26,6 +26,7 @@ class ColorPalette {
   final Color traceSuccess;
   final Color noResponse;
   final Color deferred;
+  final Color scopes;
 
   // Signal quality (SNR/RSSI) traffic-light
   final Color signalGood;
@@ -65,6 +66,7 @@ class ColorPalette {
     required this.traceSuccess,
     required this.noResponse,
     required this.deferred,
+    required this.scopes,
     required this.signalGood,
     required this.signalMedium,
     required this.signalBad,
@@ -106,6 +108,7 @@ class ColorPalettes {
     discFail: Color(0xFF9E9E9E),
     traceSuccess: Color(0xFF00BCD4),
     noResponse: Color(0xFF9E9E9E),
+    scopes: Color(0xFFF59E0B), // Amber: distinct from every other log accent
     signalGood: Colors.green,
     signalMedium: Colors.orange,
     signalBad: Colors.red,
@@ -138,6 +141,7 @@ class ColorPalettes {
     discFail: Color(0xFF9E9E9E), // Grey (unchanged)
     traceSuccess: Color(0xFF009E73), // Wong bluish green
     noResponse: Color(0xFF9E9E9E), // Grey (unchanged)
+    scopes: Color(0xFFE69F00), // Wong orange
     signalGood: Color(0xFF0072B2), // Blue
     signalMedium: Color(0xFFF0E442), // Wong yellow
     signalBad: Color(0xFFD55E00), // Vermillion
@@ -170,6 +174,7 @@ class ColorPalettes {
     discFail: Color(0xFF9E9E9E), // Grey (unchanged)
     traceSuccess: Color(0xFFD55E00), // Vermillion (replaces cyan)
     noResponse: Color(0xFF9E9E9E), // Grey (unchanged)
+    scopes: Color(0xFF56B4E9), // Wong sky blue
     signalGood: Color(0xFF009E73), // Bluish green
     signalMedium: Color(0xFFE69F00), // Orange
     signalBad: Color(0xFFD55E00), // Vermillion
@@ -202,6 +207,7 @@ class ColorPalettes {
     discFail: Color(0xFF757575), // Medium-dark
     traceSuccess: Color(0xFF757575), // Medium-dark
     noResponse: Color(0xFF616161), // Dark
+    scopes: Color(0xFFCFCFCF), // Light-medium, distinct from every other tone
     signalGood: Color(0xFFE0E0E0), // Light
     signalMedium: Color(0xFF9E9E9E), // Medium
     signalBad: Color(0xFF424242), // Very dark
@@ -266,6 +272,7 @@ class PingColors {
   static Color get traceSuccess => _activePalette.traceSuccess;
   static Color get noResponse => _activePalette.noResponse;
   static Color get deferred => _activePalette.deferred;
+  static Color get scopes => _activePalette.scopes;
 
   // ── Signal quality (SNR/RSSI traffic-light) ──
   static Color get signalGood => _activePalette.signalGood;
