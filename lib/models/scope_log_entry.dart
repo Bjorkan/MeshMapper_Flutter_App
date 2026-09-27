@@ -88,3 +88,32 @@ class ScopeLogEntry {
         '${outcome.name},"$scopesStr"';
   }
 }
+
+/// The scope log's own list state: newest-first insertion capped at
+/// [maxEntries], and a clear. `AppStateProvider` owns one instance and
+/// delegates `_addScopeLogEntry`, `clearLogs` and `clearPings` to it, so the
+/// add/cap/clear behaviour is unit-testable without constructing the
+/// provider, and the provider's three call sites are each one line.
+class ScopeLogStore {
+  /// The most entries kept before the oldest is dropped.
+  final int maxEntries;
+
+  final List<ScopeLogEntry> _entries = [];
+
+  ScopeLogStore({this.maxEntries = 500});
+
+  /// Every logged entry, newest first.
+  List<ScopeLogEntry> get entries => List.unmodifiable(_entries);
+
+  /// Inserts [entry] at the front, then drops the oldest entry once the
+  /// list grows past [maxEntries].
+  void add(ScopeLogEntry entry) {
+    _entries.insert(0, entry);
+    if (_entries.length > maxEntries) {
+      _entries.removeLast();
+    }
+  }
+
+  /// Empties the list. Called by `clearLogs` and `clearPings`.
+  void clear() => _entries.clear();
+}

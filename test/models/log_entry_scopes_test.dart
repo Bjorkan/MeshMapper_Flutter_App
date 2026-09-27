@@ -77,32 +77,13 @@ void main() {
         events: const [],
       );
       final merged = mergeUnifiedPingLog(
-          tx: [tx], rx: const [], disc: const [], trace: const [], scopes: const []);
+          tx: [tx],
+          rx: const [],
+          disc: const [],
+          trace: const [],
+          scopes: const []);
       expect(merged, hasLength(1));
       expect(merged.single.type, PingLogType.tx);
-    });
-  });
-
-  group('insertCappedNewestFirst', () {
-    test('inserts at the front', () {
-      final list = [_scope(timestamp: DateTime(2026, 9, 26, 9))];
-      final fresh = _scope(timestamp: DateTime(2026, 9, 26, 10));
-      insertCappedNewestFirst(list, fresh, 500);
-      expect(list.first, same(fresh));
-      expect(list, hasLength(2));
-    });
-
-    test('drops the oldest entry once past the cap', () {
-      final list = [
-        for (var i = 0; i < 500; i++)
-          _scope(timestamp: DateTime(2026, 9, 26, 10, i))
-      ];
-      final oldest = list.last;
-      final fresh = _scope(timestamp: DateTime(2026, 9, 27, 10));
-      insertCappedNewestFirst(list, fresh, 500);
-      expect(list, hasLength(500));
-      expect(list.first, same(fresh));
-      expect(list.contains(oldest), isFalse);
     });
   });
 }

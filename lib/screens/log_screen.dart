@@ -99,7 +99,7 @@ class _LogScreenState extends State<LogScreen>
       body: TabBarView(
         controller: _tabController,
         children: [
-          _AllPingsTab(
+          AllPingsTab(
             key: _allPingsKey,
             allEntries: appState.unifiedPingLogEntries,
             repeaters: appState.repeaters,
@@ -171,56 +171,9 @@ class _LogScreenState extends State<LogScreen>
       return;
     }
 
-    final buffer = StringBuffer();
-
-    if (tx.isNotEmpty) {
-      buffer.writeln('--- TX Log ---');
-      buffer.writeln('timestamp,latitude,longitude,power,events');
-      for (final entry in tx) {
-        buffer.writeln(entry.toCsv());
-      }
-      buffer.writeln();
-    }
-
-    if (rx.isNotEmpty) {
-      buffer.writeln('--- RX Log ---');
-      buffer.writeln(
-          'timestamp,repeater_id,snr,rssi,path_length,header,latitude,longitude,path_hops');
-      for (final entry in rx) {
-        buffer.writeln(entry.toCsv());
-      }
-      buffer.writeln();
-    }
-
-    if (disc.isNotEmpty) {
-      buffer.writeln('--- DISC Log ---');
-      buffer
-          .writeln('timestamp,latitude,longitude,noisefloor,node_count,nodes');
-      for (final entry in disc) {
-        buffer.writeln(entry.toCsv());
-      }
-      buffer.writeln();
-    }
-
-    if (trace.isNotEmpty) {
-      buffer.writeln('--- TRC Log ---');
-      buffer.writeln(
-          'timestamp,target_repeater,local_snr,local_rssi,remote_snr,latitude,longitude,noisefloor,success');
-      for (final entry in trace) {
-        buffer.writeln(entry.toCsv());
-      }
-      buffer.writeln();
-    }
-
-    if (scopes.isNotEmpty) {
-      buffer.writeln('--- SCP Log ---');
-      buffer.writeln('timestamp,latitude,longitude,repeater_id,outcome,scopes');
-      for (final entry in scopes) {
-        buffer.writeln(entry.toCsv());
-      }
-    }
-
-    Clipboard.setData(ClipboardData(text: buffer.toString()));
+    final csv = buildAllPingsCsv(
+        tx: tx, rx: rx, disc: disc, trace: trace, scopes: scopes);
+    Clipboard.setData(ClipboardData(text: csv));
     ScaffoldMessenger.of(context).showSnackBar(
       const SnackBar(
           content: Text('All ping logs copied to clipboard'),
@@ -280,7 +233,15 @@ class _LogScreenState extends State<LogScreen>
 // All Pings Tab — unified chronological view with type filters
 // =============================================================================
 
-class _AllPingsTab extends StatefulWidget {
+/// The unified TX/RX/DISC/TRC/SCP list, its type filters and its search
+/// field. Public (unlike its sibling `_ErrorLogTab`) so a test can pump it
+/// directly with a fixed `allEntries`/`repeaters`/counts, without going
+/// through `LogScreen` (which needs a live `AppStateProvider` just to reach
+/// this widget). Per-type card rendering may still need a `Provider<AppStateProvider>`
+/// ancestor for its tap-to-map action (see `_buildScopeCard`'s lazy read), so
+/// a test that only ever taps the filter row or the search field, and never a
+/// card body, needs no provider at all.
+class AllPingsTab extends StatefulWidget {
   final List<UnifiedPingLogEntry> allEntries;
   final List<Repeater> repeaters;
   final int txCount;
@@ -289,7 +250,7 @@ class _AllPingsTab extends StatefulWidget {
   final int traceCount;
   final int scopeCount;
 
-  const _AllPingsTab({
+  const AllPingsTab({
     super.key,
     required this.allEntries,
     required this.repeaters,
@@ -301,10 +262,10 @@ class _AllPingsTab extends StatefulWidget {
   });
 
   @override
-  State<_AllPingsTab> createState() => _AllPingsTabState();
+  State<AllPingsTab> createState() => _AllPingsTabState();
 }
 
-class _AllPingsTabState extends State<_AllPingsTab> {
+class _AllPingsTabState extends State<AllPingsTab> {
   final Set<PingLogType> _activeFilters = {
     PingLogType.tx,
     PingLogType.rx,
@@ -1316,14 +1277,18 @@ class _AllPingsTabState extends State<_AllPingsTab> {
   // SCP Card
   // ---------------------------------------------------------------------------
 
+  // The AppStateProvider read is deferred into the onTap closure (unlike the
+  // other card builders' eager `context.read` at the top of the method) so a
+  // widget test that renders only scope entries and never taps a card body
+  // needs no Provider ancestor at all.
   Widget _buildScopeCard(BuildContext context, ScopeLogEntry entry,
       {bool showAmbiguity = false}) {
-    final appState = context.read<AppStateProvider>();
     return ScopeLogCard(
       entry: entry,
       showAmbiguity: showAmbiguity,
-      onTap: () =>
-          appState.navigateToMapCoordinates(entry.latitude, entry.longitude),
+      onTap: () => context
+          .read<AppStateProvider>()
+          .navigateToMapCoordinates(entry.latitude, entry.longitude),
     );
   }
 
@@ -1427,6 +1392,73 @@ bool scopeEntryMatchesSearch(ScopeLogEntry entry, String query) {
     return true;
   }
   return entry.outcome.label.toLowerCase().contains(lower);
+}
+
+/// Assembles the full "Copy CSV" export (the unfiltered path taken when no
+/// search is active): one `--- X Log ---` section per non-empty list,
+/// blank-line separated. TX/RX/DISC/TRC rows are the bare `LogEntry.toCsv()`
+/// (the section header already names the type); SCP rows carry the `SCOPES,`
+/// prefix so they read identically to what the searched/filtered export
+/// produces through `UnifiedPingLogEntry.toCsv()` for the same entry. Pure
+/// and Provider-free so the export format is unit-testable without a live
+/// AppStateProvider.
+String buildAllPingsCsv({
+  required List<TxLogEntry> tx,
+  required List<RxLogEntry> rx,
+  required List<DiscLogEntry> disc,
+  required List<TraceLogEntry> trace,
+  required List<ScopeLogEntry> scopes,
+}) {
+  final buffer = StringBuffer();
+
+  if (tx.isNotEmpty) {
+    buffer.writeln('--- TX Log ---');
+    buffer.writeln('timestamp,latitude,longitude,power,events');
+    for (final entry in tx) {
+      buffer.writeln(entry.toCsv());
+    }
+    buffer.writeln();
+  }
+
+  if (rx.isNotEmpty) {
+    buffer.writeln('--- RX Log ---');
+    buffer.writeln(
+        'timestamp,repeater_id,snr,rssi,path_length,header,latitude,longitude,path_hops');
+    for (final entry in rx) {
+      buffer.writeln(entry.toCsv());
+    }
+    buffer.writeln();
+  }
+
+  if (disc.isNotEmpty) {
+    buffer.writeln('--- DISC Log ---');
+    buffer.writeln('timestamp,latitude,longitude,noisefloor,node_count,nodes');
+    for (final entry in disc) {
+      buffer.writeln(entry.toCsv());
+    }
+    buffer.writeln();
+  }
+
+  if (trace.isNotEmpty) {
+    buffer.writeln('--- TRC Log ---');
+    buffer.writeln(
+        'timestamp,target_repeater,local_snr,local_rssi,remote_snr,latitude,longitude,noisefloor,success');
+    for (final entry in trace) {
+      buffer.writeln(entry.toCsv());
+    }
+    buffer.writeln();
+  }
+
+  if (scopes.isNotEmpty) {
+    buffer.writeln('--- SCP Log ---');
+    buffer.writeln(
+        'type,timestamp,latitude,longitude,repeater_id,outcome,scopes');
+    for (final entry in scopes) {
+      buffer.writeln('SCOPES,${entry.toCsv()}');
+    }
+  }
+
+  return buffer.toString();
 }
 
 // =============================================================================
@@ -1558,7 +1590,8 @@ class ScopeLogCard extends StatelessWidget {
                 onTap: () => RepeaterIdChip.showRepeaterPopup(
                     context, entry.repeaterId,
                     fullHexId: entry.pubkeyHex),
-                child: RepeaterIdChip(repeaterId: entry.repeaterId, fontSize: 14),
+                child:
+                    RepeaterIdChip(repeaterId: entry.repeaterId, fontSize: 14),
               ),
               const SizedBox(height: 8),
               Text(
@@ -1584,8 +1617,8 @@ class ScopeLogCard extends StatelessWidget {
                     spacing: 6,
                     runSpacing: 6,
                     children: scopes
-                        .map((name) =>
-                            _AllPingsTabState._buildChip(name, PingColors.scopes))
+                        .map((name) => _AllPingsTabState._buildChip(
+                            name, PingColors.scopes))
                         .toList(),
                   ),
               ],

@@ -280,10 +280,10 @@ List<UnifiedPingLogEntry> mergeUnifiedPingLog({
   required List<ScopeLogEntry> scopes,
 }) {
   final merged = <UnifiedPingLogEntry>[
-    ...tx.map((e) =>
-        UnifiedPingLogEntry(type: PingLogType.tx, timestamp: e.timestamp, entry: e)),
-    ...rx.map((e) =>
-        UnifiedPingLogEntry(type: PingLogType.rx, timestamp: e.timestamp, entry: e)),
+    ...tx.map((e) => UnifiedPingLogEntry(
+        type: PingLogType.tx, timestamp: e.timestamp, entry: e)),
+    ...rx.map((e) => UnifiedPingLogEntry(
+        type: PingLogType.rx, timestamp: e.timestamp, entry: e)),
     ...disc.map((e) => UnifiedPingLogEntry(
         type: PingLogType.disc, timestamp: e.timestamp, entry: e)),
     ...trace.map((e) => UnifiedPingLogEntry(
@@ -293,16 +293,6 @@ List<UnifiedPingLogEntry> mergeUnifiedPingLog({
   ];
   merged.sort();
   return merged;
-}
-
-/// Inserts [entry] at the front of [entries] (newest first), then drops the
-/// oldest entry once the list grows past [maxEntries]. The shared shape every
-/// ping log list caps to (`AppStateProvider._maxLogEntries`).
-void insertCappedNewestFirst<T>(List<T> entries, T entry, int maxEntries) {
-  entries.insert(0, entry);
-  if (entries.length > maxEntries) {
-    entries.removeLast();
-  }
 }
 
 /// User Error Entry for error log

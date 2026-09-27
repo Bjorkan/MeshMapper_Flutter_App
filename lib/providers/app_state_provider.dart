@@ -401,7 +401,7 @@ class AppStateProvider extends ChangeNotifier with WidgetsBindingObserver {
   final List<RxLogEntry> _rxLogEntries = [];
   final List<DiscLogEntry> _discLogEntries = [];
   final List<TraceLogEntry> _traceLogEntries = [];
-  final List<ScopeLogEntry> _scopeLogEntries = [];
+  final ScopeLogStore _scopeLog = ScopeLogStore(maxEntries: _maxLogEntries);
   final List<PingEventMarker> _deferredPingMarkers = [];
   final List<PingEventMarker> _startingDeferredHistory = [];
 
@@ -1231,8 +1231,7 @@ class AppStateProvider extends ChangeNotifier with WidgetsBindingObserver {
   List<DiscLogEntry> get discLogEntries => List.unmodifiable(_discLogEntries);
   List<TraceLogEntry> get traceLogEntries =>
       List.unmodifiable(_traceLogEntries);
-  List<ScopeLogEntry> get scopeLogEntries =>
-      List.unmodifiable(_scopeLogEntries);
+  List<ScopeLogEntry> get scopeLogEntries => _scopeLog.entries;
   List<UserErrorEntry> get errorLogEntries =>
       List.unmodifiable(_errorLogEntries);
   List<UnifiedPingLogEntry> get unifiedPingLogEntries => mergeUnifiedPingLog(
@@ -1240,7 +1239,7 @@ class AppStateProvider extends ChangeNotifier with WidgetsBindingObserver {
         rx: _rxLogEntries,
         disc: _discLogEntries,
         trace: _traceLogEntries,
-        scopes: _scopeLogEntries,
+        scopes: _scopeLog.entries,
       );
 
   ({double lat, double lon})? get mapNavigationTarget => _mapNavigationTarget;
@@ -7896,7 +7895,7 @@ class AppStateProvider extends ChangeNotifier with WidgetsBindingObserver {
     _rxPings.clear();
     _discLogEntries.clear();
     _traceLogEntries.clear();
-    _scopeLogEntries.clear();
+    _scopeLog.clear();
     _deferredPingMarkers.clear();
     _lastDeferredMarkerLat = null;
     _lastDeferredMarkerLon = null;
@@ -7912,7 +7911,7 @@ class AppStateProvider extends ChangeNotifier with WidgetsBindingObserver {
     _rxLogEntries.clear();
     _discLogEntries.clear();
     _traceLogEntries.clear();
-    _scopeLogEntries.clear();
+    _scopeLog.clear();
     _deferredPingMarkers.clear();
     _lastDeferredMarkerLat = null;
     _lastDeferredMarkerLon = null;
@@ -7953,7 +7952,7 @@ class AppStateProvider extends ChangeNotifier with WidgetsBindingObserver {
   /// Nothing here is on the map (Critical Rule 9), so this stays a plain
   /// notify, never `_notifyMapNow`.
   void _addScopeLogEntry(ScopeLogEntry entry) {
-    insertCappedNewestFirst(_scopeLogEntries, entry, _maxLogEntries);
+    _scopeLog.add(entry);
     debugLog('[SCOPES] Log entry added: outcome=${entry.outcome.name}');
     notifyListeners();
   }
