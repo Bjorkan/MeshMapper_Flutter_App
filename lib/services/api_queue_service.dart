@@ -449,6 +449,16 @@ class ApiQueueService {
     }
     _isRecovering = true;
 
+    // Deleting the box erases every queued item, exactly as a clear does, so
+    // it is a new generation. Bumped synchronously, before the first await
+    // below, like the clear paths: a SCOPES whose DISC sat in this box would
+    // otherwise be accepted by its retry and uploaded as if the DISC had gone
+    // out. That includes a second enqueue that fails while this recovery is
+    // still closing the box: it skips recovery (one runs at a time) and must
+    // already see the new generation, or it lands in memory under the old one.
+    _bumpGeneration();
+    debugLog('[API QUEUE] Queue generation bumped for storage recovery');
+
     try {
       debugLog(
           '[API QUEUE] Runtime corruption detected - recovering box "$_boxName"...');
@@ -459,13 +469,6 @@ class ApiQueueService {
       } catch (e) {
         debugWarn('[API QUEUE] Failed to close corrupt box: $e');
       }
-
-      // Deleting the box erases every queued item, exactly as a clear does,
-      // so it is a new generation. Bumped before the delete, like the clear
-      // paths: a SCOPES whose DISC sat in this box would otherwise be
-      // accepted by its retry and uploaded as if the DISC had gone out.
-      _bumpGeneration();
-      debugLog('[API QUEUE] Queue generation bumped for storage recovery');
 
       // Delete from disk and reopen
       await Hive.deleteBoxFromDisk(_boxName);
@@ -1172,7 +1175,15 @@ class ApiQueueService {
       final result = await _apiService.uploadBatch(pings);
 
       if (result == UploadResult.success) {
-        final uploadedCount = items.length;
+        // A replay that left SCOPES out (scope discovery withdrawn while the
+        // first attempt failed) still deletes them below, since the region
+        // no longer takes them, but they were never sent, so they are not
+        // counted as uploaded, handed on, or forwarded.
+        final strippedScopes = _apiService.lastUploadDroppedScopes > 0;
+        final sentItems = strippedScopes
+            ? items.where((item) => item.type != 'SCOPES').toList()
+            : items;
+        final uploadedCount = sentItems.length;
         // Remove successful Hive items
         for (final item in hiveItems) {
           try {
@@ -1183,18 +1194,20 @@ class ApiQueueService {
         for (final item in memoryItems) {
           _memoryQueue.remove(item);
         }
-        debugLog('[API QUEUE] Upload SUCCESS: deleted $uploadedCount items');
+        debugLog('[API QUEUE] Upload SUCCESS: deleted ${items.length} items'
+            '${strippedScopes ? ' ($uploadedCount sent, ${items.length - uploadedCount} SCOPES dropped by the replay)' : ''}');
         // The network is demonstrably back, so give anything the ladder has
         // already written off one more chance.
         _reviveFailedItems();
-        onUploadSuccess?.call(uploadedCount, items);
+        onUploadSuccess?.call(uploadedCount, sentItems);
         // Fire-and-forget: forward to custom API endpoint. A withdrawal
         // that landed while this batch was in flight made the replay leave
         // its SCOPES out (ApiService.submitWardriveData), so leave them out
         // here too: a withdrawn answer is never forwarded.
-        customApiService?.forwardPings(scopesAllowedGetter?.call() == false
-            ? withoutScopesItems(pings)
-            : pings);
+        customApiService?.forwardPings(
+            strippedScopes || scopesAllowedGetter?.call() == false
+                ? withoutScopesItems(pings)
+                : pings);
       } else if (result == UploadResult.nonRetryable) {
         // Data is permanently invalid — discard
         for (final item in hiveItems) {

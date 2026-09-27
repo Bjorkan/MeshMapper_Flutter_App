@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
@@ -509,6 +510,46 @@ void main() {
             reason: 'the retry must not run against the wiped queue');
         expect(recoveredInner.length, 0);
         expect(queue.heldItems, isEmpty);
+      });
+
+      // The bump must land before recovery's first await. A second SCOPES
+      // enqueue that fails while the first one's recovery is still closing
+      // the box skips recovery (one runs at a time) and would otherwise
+      // retry against the closed box and fall back to memory under the old
+      // generation, just before recovery erased its DISC.
+      test(
+          'two concurrent enqueues: the second fails while the first '
+          "one's recovery is closing the box, and both refuse", () async {
+        final queue = newQueue();
+        final discInner = await Hive.openBox<ApiQueueItem>('scopes_failing');
+        final closing = Completer<void>();
+        final closeStarted = Completer<void>();
+        final failing = _ScriptedBox(discInner)
+          ..onClose = () async {
+            closeStarted.complete();
+            await closing.future;
+          };
+        final recovered = _ScriptedBox(recoveredInner);
+        queue.testBox = failing;
+        queue.reopenBoxForRecovery = () async => recovered;
+
+        await enqueueDisc(queue);
+        final gen = queue.generation;
+        failing.failAdd = true;
+
+        final first = enqueue(queue, gen);
+        await closeStarted.future;
+        expect(queue.generation, isNot(gen),
+            reason: 'bumped before recovery waits on the close');
+        final second = await enqueue(queue, gen);
+        closing.complete();
+
+        expect(second, isFalse);
+        expect(await first, isFalse);
+        expect(recovered.addCalls, 0);
+        expect(recoveredInner.length, 0);
+        expect(queue.heldItems, isEmpty,
+            reason: 'nothing in memory: neither answer may be stamped');
       });
 
       test('with no clear, a recovery on its own still refuses the retry: '
@@ -1039,8 +1080,11 @@ class _ScriptedBox implements Box<ApiQueueItem> {
   @override
   Future<int> clear() async => await inner?.clear() ?? 0;
 
+  /// Runs (and is awaited) inside close, before it returns.
+  Future<void> Function()? onClose;
+
   @override
-  Future<void> close() async {}
+  Future<void> close() async => await onClose?.call();
 
   @override
   int get length => inner?.length ?? 0;

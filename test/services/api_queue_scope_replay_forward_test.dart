@@ -60,6 +60,9 @@ void main() {
     final queue = ApiQueueService(apiService: api)
       ..customApiService = custom;
     queue.scopesAllowedGetter = () => api.scopeDiscoveryOffered;
+    final uploaded = <(int, List<String>)>[];
+    queue.onUploadSuccess =
+        (count, items) => uploaded.add((count, [for (final i in items) i.type]));
 
     await queue.enqueueDisc(
       latitude: 45.0,
@@ -92,6 +95,10 @@ void main() {
     expect(forwarded, hasLength(1));
     expect(forwarded.single.map((e) => e['type']), ['DISC']);
     expect(queue.queueSize, 0);
+    // Only what the replay actually sent counts as uploaded.
+    expect(uploaded, hasLength(1));
+    expect(uploaded.single.$1, 1);
+    expect(uploaded.single.$2, ['DISC']);
     api.dispose();
   });
 }

@@ -1082,6 +1082,14 @@ class ApiService {
         'holding every wardrive send for ${wait.inSeconds}s');
   }
 
+  int _lastUploadDroppedScopes = 0;
+
+  /// How many SCOPES items the last [submitWardriveData] call left out of
+  /// its replay because scope discovery was withdrawn while the first
+  /// attempt was failing. Zero when nothing was left out. The queue reads it
+  /// after a success so it counts only what the server actually received.
+  int get lastUploadDroppedScopes => _lastUploadDroppedScopes;
+
   /// Submit wardrive data batch to API
   /// Matches submitWardriveData() in wardrive.js
   ///
@@ -1092,6 +1100,7 @@ class ApiService {
   /// that apart from a rejection and hold the data without spending a retry
   Future<Map<String, dynamic>?> submitWardriveData(
       List<Map<String, dynamic>> entries) async {
+    _lastUploadDroppedScopes = 0;
     if (_sessionId == null) {
       throw Exception('Cannot submit: no session_id');
     }
@@ -1126,6 +1135,7 @@ class ApiService {
           final kept =
               entries.where((e) => e['type'] != 'SCOPES').toList();
           if (kept.length == entries.length) return () => post(payload);
+          _lastUploadDroppedScopes = entries.length - kept.length;
           debugWarn('[API] Replay drops ${entries.length - kept.length} '
               'SCOPES item(s): scope discovery withdrawn since the batch '
               'was built');
