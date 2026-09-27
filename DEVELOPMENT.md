@@ -738,8 +738,9 @@ Off by default until a region turns it on.
   in-flight TX, or immediate), force disable, the airborne block, an Offline Mode switch in
   either direction, a zone transfer, user disconnect, the full disconnect cleanup,
   auto-reconnect, provider disposal, and the gate closing while a request runs (a live `/auth`
-  answer, a session recovery's included, that drops or disables `scope_discovery`, or the user
-  switching the feature off; `ApiService.onScopeDiscoveryChanged` and
+  answer, a session recovery's included, that drops or disables `scope_discovery`, applied
+  before anything in that answer's handling is awaited, the stale wire-tag queue cleanup of a
+  new session id included, or the user switching the feature off; `ApiService.onScopeDiscoveryChanged` and
   `ScopeLifecycle.onGateChanged`) (`ScopeStopEvent` in
   `lib/services/scope_discovery/scope_lifecycle.dart`). Every one of these cancels the
   runner's token at once (no further frame goes out for it), releases a held lease

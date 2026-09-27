@@ -839,6 +839,10 @@ class ApiService {
           // upload, so tell the listener to drop those pings.
           final previousSessionId = _sessionId;
           final newSessionId = data['session_id'] as String?;
+          // A withdrawal of scope discovery takes effect before anything is
+          // awaited: a lookup already out could otherwise complete and send
+          // its scope request while the queue cleanup below runs.
+          _applyScopeDiscovery(data, withdrawOnly: true);
           if (previousSessionId != null &&
               newSessionId != null &&
               previousSessionId != newSessionId) {
@@ -951,15 +955,7 @@ class ApiService {
           // Scope discovery (APP_API.md). The key's PRESENCE is the gate: a
           // server that predates the feature would store a SCOPES item as a
           // TX row.
-          final wasOffered = _scopeDiscoveryOffered;
-          final wasEnforced = _enforceScopeDiscovery;
-          _scopeDiscoveryOffered = data.containsKey('scope_discovery');
-          final sd = data['scope_discovery'];
-          _enforceScopeDiscovery = sd == true || sd == 1;
-          if (wasOffered != _scopeDiscoveryOffered ||
-              wasEnforced != _enforceScopeDiscovery) {
-            onScopeDiscoveryChanged?.call();
-          }
+          _applyScopeDiscovery(data);
           final sdDays = data['scope_refresh_days'];
           _apiScopeRefreshDays = sdDays is num && sdDays.isFinite
               ? (sdDays.toInt() < 7 ? 7 : sdDays.toInt())
@@ -1671,6 +1667,26 @@ class ApiService {
 
   /// Callback for maintenance mode detection (while connected)
   void Function(String message, String? url)? onMaintenanceMode;
+
+  /// Reads `scope_discovery` from a live auth answer and fires
+  /// [onScopeDiscoveryChanged] when either flag changes. With [withdrawOnly]
+  /// only a withdrawal is applied (offered or enforced going false), never a
+  /// grant: it runs before the answer's session is known to be stored, so a
+  /// stale answer can only ever switch scope work off.
+  void _applyScopeDiscovery(Map<String, dynamic> data,
+      {bool withdrawOnly = false}) {
+    final offered = data.containsKey('scope_discovery');
+    final sd = data['scope_discovery'];
+    final enforced = sd == true || sd == 1;
+    final wasOffered = _scopeDiscoveryOffered;
+    final wasEnforced = _enforceScopeDiscovery;
+    _scopeDiscoveryOffered = withdrawOnly ? wasOffered && offered : offered;
+    _enforceScopeDiscovery = withdrawOnly ? wasEnforced && enforced : enforced;
+    if (wasOffered != _scopeDiscoveryOffered ||
+        wasEnforced != _enforceScopeDiscovery) {
+      onScopeDiscoveryChanged?.call();
+    }
+  }
 
   /// Fired synchronously whenever [scopeDiscoveryOffered] or
   /// [enforceScopeDiscovery] changes (a live `/auth` answer, or the session

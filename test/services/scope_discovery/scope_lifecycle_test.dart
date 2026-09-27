@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:typed_data';
 
@@ -410,6 +411,149 @@ void main() {
         expect(radio.commands, isNot(contains(CommandCodes.sendAnonReq)));
         expect(radio.commands, [CommandCodes.getContactByKey]);
         expect(conn.isScopeLeaseActive, isFalse);
+      });
+    });
+
+    test(
+        'with a new session id it stops the lookup before the stale TX '
+        'cleanup runs', () {
+      support.onScopeClock(support.ScopeRadio.new, (async, radio, conn) {
+        var offerScopes = true;
+        var sessionId = 'YOW-20260905-0001';
+        final api = ApiService(
+          client: MockClient((request) async => http.Response(
+              json.encode({
+                'success': true,
+                'session_id': sessionId,
+                'tx_allowed': true,
+                'rx_allowed': true,
+                'expires_at':
+                    clock.now().millisecondsSinceEpoch ~/ 1000 + 300,
+                if (offerScopes) 'scope_discovery': false,
+              }),
+              200)),
+        );
+        void auth() {
+          api.requestAuth(
+              reason: 'connect',
+              publicKey: 'AB' * 32,
+              lat: 45.42,
+              lon: -75.70);
+          async.elapse(const Duration(milliseconds: 10));
+        }
+
+        ScopeGateInputs gate() => (
+              offered: api.scopeDiscoveryOffered,
+              enforced: api.enforceScopeDiscovery,
+              userEnabled: true,
+              offlineMode: false,
+              firmwareCode: 13,
+            );
+        final h = _Harness();
+        api.onScopeDiscoveryChanged = () => h.lifecycle.onGateChanged(gate());
+        // The stale tagged TX cleanup, held open by the test.
+        final cleanup = Completer<void>();
+        final sessionChanges = <String>[];
+        api.onSessionIdChanged = (previous, next) {
+          sessionChanges.add('$previous>$next');
+          return cleanup.future;
+        };
+
+        auth();
+        expect(api.scopeDiscoveryOffered, isTrue);
+        final runner = h.lifecycle.buildRunner(
+          gate: gate(),
+          connection: conn,
+          deviceKey: 'KEY',
+          create: (key, restores) => ScopeRunner(
+            radio: MeshCoreScopeRadio(conn),
+            cancel: ScopeCancelToken(),
+            hardStop: clock.now().add(const Duration(seconds: 30)),
+            refreshDays: () => 14,
+            deviceKey: () => key,
+            serverInfo: (_) => (onList: false, checkedAt: null),
+            cache: ScopeQueryCache.fromJson(null),
+            budget: ScopeHourlyBudget(save: (_) async {}),
+            enqueue: (_, __) async => true,
+            nowSec: () => clock.now().millisecondsSinceEpoch ~/ 1000,
+            currentPosition: () => null,
+            stillWanted: () => true,
+            onActiveChanged: h.lifecycle.setRequestActive,
+            onLogged: (_) {},
+            pendingRestores: restores,
+          ),
+        )!;
+        runner.run([_cand(0x11)], discPersisted: Future<void>.value());
+        async.flushMicrotasks();
+        expect(radio.commands, [CommandCodes.getContactByKey]);
+
+        // A recovery's answer: no key, and a new session id.
+        offerScopes = false;
+        sessionId = 'YOW-20260905-0002';
+        auth();
+        expect(sessionChanges,
+            ['YOW-20260905-0001>YOW-20260905-0002'],
+            reason: 'the cleanup is running');
+        expect(runner.isCancelled, isTrue,
+            reason: 'withdrawn before the cleanup is awaited');
+        expect(h.lifecycle.requestActive, isFalse);
+
+        // The lookup's reply lands while the cleanup is still running.
+        radio.emit([ResponseCodes.err, ErrorCodes.notFound]);
+        async.elapse(const Duration(seconds: 5));
+        expect(radio.commands, isNot(contains(CommandCodes.sendAnonReq)));
+
+        cleanup.complete();
+        async.elapse(const Duration(seconds: 5));
+        expect(api.sessionId, 'YOW-20260905-0002');
+        expect(api.scopeDiscoveryOffered, isFalse);
+        expect(radio.commands, [CommandCodes.getContactByKey]);
+        expect(conn.isScopeLeaseActive, isFalse);
+      });
+    });
+
+    test('a stale owner after the cleanup still leaves scope withdrawn', () {
+      fakeAsync((async) {
+        var offerScopes = true;
+        var sessionId = 'YOW-20260905-0001';
+        final api = ApiService(
+          client: MockClient((request) async => http.Response(
+              json.encode({
+                'success': true,
+                'session_id': sessionId,
+                'tx_allowed': true,
+                'rx_allowed': true,
+                'expires_at':
+                    clock.now().millisecondsSinceEpoch ~/ 1000 + 300,
+                if (offerScopes) 'scope_discovery': true,
+              }),
+              200)),
+        );
+        var fired = 0;
+        api.onScopeDiscoveryChanged = () => fired++;
+        var owner = true;
+        api.onSessionIdChanged = (_, __) async => owner = false;
+        void auth() {
+          api.requestAuth(
+              reason: 'connect',
+              publicKey: 'AB' * 32,
+              lat: 45.42,
+              lon: -75.70,
+              shouldStoreSession: () => owner);
+          async.elapse(const Duration(milliseconds: 10));
+        }
+
+        auth();
+        expect(api.enforceScopeDiscovery, isTrue);
+        expect(fired, 1);
+        offerScopes = false;
+        sessionId = 'YOW-20260905-0002';
+        auth();
+        expect(api.scopeDiscoveryOffered, isFalse);
+        expect(api.enforceScopeDiscovery, isFalse);
+        expect(fired, 2);
+        expect(api.sessionId, 'YOW-20260905-0001',
+            reason: 'a stale owner stores no session');
       });
     });
 
