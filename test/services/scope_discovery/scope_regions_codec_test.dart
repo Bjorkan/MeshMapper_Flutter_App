@@ -43,8 +43,22 @@ void main() {
     expect(parseRegionsReply(reply('a,')), isNull);
     expect(parseRegionsReply(reply(',a')), isNull);
   });
-  test('any NUL is malformed', () {
-    expect(parseRegionsReply(reply('a,b\u0000')), isNull);
+  test('trailing zero padding from the cipher block is ignored', () {
+    // The body a real repeater sent (clock, names, then block padding).
+    final d = Uint8List.fromList([
+      0xeb, 0x94, 0xba, 0x6a, //
+      ...utf8.encode('*,yow,on,onqc,can'),
+      0, 0, 0, 0, 0, 0, 0,
+    ]);
+    expect(parseRegionsReply(d), ['*', 'yow', 'on', 'onqc', 'can']);
+  });
+  test('padding only after the clock is a valid empty answer', () {
+    expect(parseRegionsReply(Uint8List.fromList([1, 2, 3, 4, 0, 0, 0])),
+        <String>[]);
+  });
+  test('a NUL before the end is malformed', () {
+    expect(parseRegionsReply(reply('a\u0000b')), isNull);
+    expect(parseRegionsReply(reply('a,\u0000,b')), isNull);
   });
   test('invalid UTF-8 is malformed, never throws', () {
     final d = Uint8List.fromList([0, 0, 0, 0, 0x61, 0xFF, 0x2C, 0x62]);

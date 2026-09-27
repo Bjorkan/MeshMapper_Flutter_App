@@ -16,9 +16,17 @@ Uint8List buildRegionsRequest() =>
 /// case-sensitive in firmware, so nothing is trimmed or lower-cased.
 /// Byte-faithful: splits at 0x2C (comma), validates each segment's bytes,
 /// decodes, and preserves any leading byte-order mark (BOM, U+FEFF).
+///
+/// The reply travels AES encrypted in 16-byte blocks and the companion
+/// hands over whole blocks, so the names are followed by zero padding.
+/// Trailing zeros are dropped; a zero anywhere before them is malformed.
 List<String>? parseRegionsReply(Uint8List data) {
   if (data.length < 4) return null;
-  final body = data.sublist(4);
+  var end = data.length;
+  while (end > 4 && data[end - 1] == 0) {
+    end--;
+  }
+  final body = data.sublist(4, end);
   if (body.isEmpty) return const <String>[];
   if (body.contains(0)) return null;
 
