@@ -1,22 +1,21 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:mesh_mapper/providers/app_state_provider.dart';
 
-/// While the connected radio's contact table is full (a companion firmware
-/// bug this connection has already hit), the Settings tile grows an extra
-/// line, but only while connected to that radio.
+/// The flag flipping on drops one warning in the error log, once per
+/// connection: `AppStateProvider` cannot be built in these tests (it needs a
+/// live Bluetooth service, Hive boxes, and a dozen other services), so this
+/// exercises the pure once-per-connection decision `_wireScopeCannotAskNonContacts`
+/// makes at the call site instead.
 void main() {
-  test('connected with the flag set needs the note', () {
+  test('the first flip on a connection should log', () {
     expect(
-        scopeDiscoveryContactsFull(connected: true, flagSet: true), isTrue);
+        shouldLogScopeContactsFull(alreadyLoggedThisConnection: false),
+        isTrue);
   });
 
-  test('connected with the flag clear needs no note', () {
+  test('a later flip on the same connection should not log again', () {
     expect(
-        scopeDiscoveryContactsFull(connected: true, flagSet: false), isFalse);
-  });
-
-  test('disconnected never needs the note, whatever the flag last read', () {
-    expect(
-        scopeDiscoveryContactsFull(connected: false, flagSet: true), isFalse);
+        shouldLogScopeContactsFull(alreadyLoggedThisConnection: true),
+        isFalse);
   });
 }

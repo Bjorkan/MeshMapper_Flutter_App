@@ -209,15 +209,15 @@ bool scopeDiscoveryFirmwareTooOld(
     connected &&
     (firmwareCode ?? 0) < AppStateProvider.kScopeDiscoveryCompanionVersionCode;
 
-/// Whether the connected radio's contact table is full and this connection
-/// has stopped asking a repeater that is not a saved contact for its scopes
-/// (`MeshCoreConnection.scopeCannotAskNonContacts`). The Settings tile grows
-/// an extra line while this reads true. Not connected means nothing to warn
-/// about yet, whatever the flag last read.
+/// Whether a "cannot ask non-contacts" flip should add a new error-log entry
+/// for the connection that just hit it: only the first time, per connection.
+/// `MeshCoreConnection` already fires
+/// `onScopeCannotAskNonContactsChanged` at most once per connection life (its
+/// own flag never resets to false mid-connection), so this mirrors that
+/// guard at the call site rather than relying on it alone.
 @visibleForTesting
-bool scopeDiscoveryContactsFull(
-        {required bool connected, required bool flagSet}) =>
-    connected && flagSet;
+bool shouldLogScopeContactsFull({required bool alreadyLoggedThisConnection}) =>
+    !alreadyLoggedThisConnection;
 
 /// Main application state provider
 class AppStateProvider extends ChangeNotifier with WidgetsBindingObserver {
@@ -859,13 +859,27 @@ class AppStateProvider extends ChangeNotifier with WidgetsBindingObserver {
     };
   }
 
-  /// Rebuilds the Scope Discovery settings tile when [connection]'s
-  /// "cannot ask non-contacts" flag flips. Fired once, only on the
-  /// transition, so this is a plain notify: the map does not render it
-  /// (Rule 9).
+  /// Drops a warning in the error log the first time [connection]'s "cannot
+  /// ask non-contacts" flag flips to true: users rarely go back to Settings
+  /// mid-drive to see a note there. Fired once, only on the transition, and
+  /// [shouldLogScopeContactsFull] latches it to once per connection even so.
+  /// The plain notify afterward is a rebuild hook for the raw flag; the map
+  /// does not render it (Rule 9).
   void _wireScopeCannotAskNonContacts(MeshCoreConnection connection) {
+    var loggedThisConnection = false;
     connection.onScopeCannotAskNonContactsChanged = () {
       if (_isDisposed || !identical(_meshCoreConnection, connection)) return;
+      if (shouldLogScopeContactsFull(
+          alreadyLoggedThisConnection: loggedThisConnection)) {
+        loggedThisConnection = true;
+        logError(
+          "Your radio's contact list is full, so scope discovery can only "
+          'ask repeaters saved as contacts. Companion firmware v1.17 or '
+          'newer fixes this, or remove some contacts.',
+          severity: ErrorSeverity.warning,
+          autoSwitch: false,
+        );
+      }
       notifyListeners();
     };
   }
@@ -1792,15 +1806,10 @@ class AppStateProvider extends ChangeNotifier with WidgetsBindingObserver {
 
   /// True while the connected companion has stopped asking a repeater that
   /// is not a saved contact for its scopes (its contact table is full).
-  /// Raw, not gated on being connected; see [scopeDiscoveryNeedsContactSlot]
-  /// for the gated form the Settings tile's note reads.
+  /// Raw, not gated on being connected. The transition to true also drops a
+  /// warning in the error log; see [_wireScopeCannotAskNonContacts].
   bool get scopeCannotAskNonContacts =>
       _meshCoreConnection?.scopeCannotAskNonContacts ?? false;
-
-  /// Whether the Settings tile's contact-table-full note should show; see
-  /// [scopeDiscoveryContactsFull].
-  bool get scopeDiscoveryNeedsContactSlot => scopeDiscoveryContactsFull(
-      connected: isConnected, flagSet: scopeCannotAskNonContacts);
 
   /// Null means the ordinary all-time overlay. Regional window overrides apply.
   int? get coverageOverlayDays =>

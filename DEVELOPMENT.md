@@ -825,11 +825,14 @@ Off by default until a region turns it on.
   the lease ends right there without writing the send (`ScopeNonContactRefused`, a debug log line
   only, never a log tab entry). A saved contact is asked exactly as before, flag or no flag. The
   log tab shows the ERR 3 that sets the flag as "Radio contact list full"
-  (`ScopeLogOutcome.radioContactsFull`) rather than the generic "Radio error", and while connected
-  with the flag set the Scope Discovery tile grows a note naming the fix (companion firmware v1.17
-  or newer, or removing some contacts), fired only on the transition through
-  `MeshCoreConnection.onScopeCannotAskNonContactsChanged` (a plain `notifyListeners()`, never a
-  `mapRevision` bump, per Rule 9).
+  (`ScopeLogOutcome.radioContactsFull`) rather than the generic "Radio error", and the first time a
+  connection sees the flag set, `AppStateProvider` drops a warning into the Errors list naming the
+  fix (companion firmware v1.17 or newer, or removing some contacts) instead of the generic error,
+  since users rarely reopen Settings mid-drive to see a note there. Fired only on the transition
+  through `MeshCoreConnection.onScopeCannotAskNonContactsChanged`, latched to once per connection,
+  and logged with `severity: ErrorSeverity.warning, autoSwitch: false` so it never pulls the user to
+  the Errors tab on its own (a plain `notifyListeners()` still follows, never a `mapRevision` bump,
+  per Rule 9).
 
 - **Choosing repeaters and the distance gate**: strongest local RSSI first, local SNR to break
   a tie, then the repeater's key for a stable order past that; at most 3 per sweep
