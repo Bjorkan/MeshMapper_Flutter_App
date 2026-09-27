@@ -68,6 +68,14 @@ class UserPreferences {
   /// Limit the map overlay to the effective Smart Pinging coverage window.
   final bool smartPingRecentCoverageOnly;
 
+  /// Scope discovery: after each discovery sweep, ask the repeaters found for
+  /// the scopes they carry. See DEVELOPMENT.md "Scope Discovery".
+  final bool scopeDiscoveryEnabled;
+
+  /// Scope discovery refresh window in days ([ScopeDiscoveryDays.min] to
+  /// [ScopeDiscoveryDays.max]).
+  final int scopeDiscoveryDays;
+
   /// Show hollow circle markers on the map where pings were deferred by
   /// Smart Pinging.
   final bool showDeferredMarkers;
@@ -180,6 +188,8 @@ class UserPreferences {
     this.smartPingEnabled = true,
     this.smartPingDays = SmartPingDays.defaultDays,
     this.smartPingRecentCoverageOnly = false,
+    this.scopeDiscoveryEnabled = false,
+    this.scopeDiscoveryDays = ScopeDiscoveryDays.defaultDays,
     this.showDeferredMarkers = true,
     this.mapAutoFollow = false,
     this.mapAlwaysNorth = true,
@@ -239,6 +249,13 @@ class UserPreferences {
       smartPingDays: switch ((json['smartPingDays'] as num?)?.toInt()) {
         final int d when d >= SmartPingDays.min && d <= SmartPingDays.max => d,
         _ => SmartPingDays.defaultDays,
+      },
+      scopeDiscoveryEnabled: (json['scopeDiscoveryEnabled'] as bool?) ?? false,
+      scopeDiscoveryDays: switch ((json['scopeDiscoveryDays'] as num?)?.toInt()) {
+        null => ScopeDiscoveryDays.defaultDays,
+        final int d when d < ScopeDiscoveryDays.min => ScopeDiscoveryDays.min,
+        final int d when d > ScopeDiscoveryDays.max => ScopeDiscoveryDays.max,
+        final int d => d,
       },
       mapAutoFollow: (json['mapAutoFollow'] as bool?) ?? false,
       mapAlwaysNorth: (json['mapAlwaysNorth'] as bool?) ?? true,
@@ -330,6 +347,8 @@ class UserPreferences {
       'smartPingEnabled': smartPingEnabled,
       'smartPingDays': smartPingDays,
       'smartPingRecentCoverageOnly': smartPingRecentCoverageOnly,
+      'scopeDiscoveryEnabled': scopeDiscoveryEnabled,
+      'scopeDiscoveryDays': scopeDiscoveryDays,
       'showDeferredMarkers': showDeferredMarkers,
       'mapAutoFollow': mapAutoFollow,
       'mapAlwaysNorth': mapAlwaysNorth,
@@ -384,6 +403,8 @@ class UserPreferences {
     bool? smartPingEnabled,
     int? smartPingDays,
     bool? smartPingRecentCoverageOnly,
+    bool? scopeDiscoveryEnabled,
+    int? scopeDiscoveryDays,
     bool? showDeferredMarkers,
     bool? mapAutoFollow,
     bool? mapAlwaysNorth,
@@ -439,6 +460,8 @@ class UserPreferences {
       smartPingDays: smartPingDays ?? this.smartPingDays,
       smartPingRecentCoverageOnly:
           smartPingRecentCoverageOnly ?? this.smartPingRecentCoverageOnly,
+      scopeDiscoveryEnabled: scopeDiscoveryEnabled ?? this.scopeDiscoveryEnabled,
+      scopeDiscoveryDays: scopeDiscoveryDays ?? this.scopeDiscoveryDays,
       showDeferredMarkers: showDeferredMarkers ?? this.showDeferredMarkers,
       mapAutoFollow: mapAutoFollow ?? this.mapAutoFollow,
       mapAlwaysNorth: mapAlwaysNorth ?? this.mapAlwaysNorth,
@@ -525,6 +548,8 @@ class UserPreferences {
         other.smartPingEnabled == smartPingEnabled &&
         other.smartPingDays == smartPingDays &&
         other.smartPingRecentCoverageOnly == smartPingRecentCoverageOnly &&
+        other.scopeDiscoveryEnabled == scopeDiscoveryEnabled &&
+        other.scopeDiscoveryDays == scopeDiscoveryDays &&
         other.mapAutoFollow == mapAutoFollow &&
         other.mapAlwaysNorth == mapAlwaysNorth &&
         other.mapRotationLocked == mapRotationLocked &&
@@ -574,6 +599,8 @@ class UserPreferences {
       smartPingEnabled,
       smartPingDays,
       smartPingRecentCoverageOnly,
+      scopeDiscoveryEnabled,
+      scopeDiscoveryDays,
       mapAutoFollow,
       mapAlwaysNorth,
       mapRotationLocked,
@@ -642,6 +669,15 @@ class MinPingDistance {
 /// accepted; an enforced window from the regional admin uses the same range.
 class SmartPingDays {
   static const int min = 1;
+  static const int max = 365;
+  static const int defaultDays = 14;
+}
+
+/// Scope discovery refresh window bounds (days). Stored values are clamped
+/// into range rather than falling back to the default, so an admin-set
+/// window that briefly went out of bounds is never silently discarded.
+class ScopeDiscoveryDays {
+  static const int min = 7;
   static const int max = 365;
   static const int defaultDays = 14;
 }

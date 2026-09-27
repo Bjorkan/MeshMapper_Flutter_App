@@ -191,6 +191,17 @@ Future<bool> awaitSessionRecoveryBounded(
   }
 }
 
+/// Whether a connected radio's companion firmware is too old for scope
+/// discovery (below [AppStateProvider.kScopeDiscoveryCompanionVersionCode]).
+/// The Scope Discovery switch still saves either way; this only decides
+/// whether the Settings tile grows its extra warning line. Not connected
+/// means nothing to warn about yet, whatever the last-seen firmware code was.
+@visibleForTesting
+bool scopeDiscoveryFirmwareTooOld(
+        {required bool connected, required int? firmwareCode}) =>
+    connected &&
+    (firmwareCode ?? 0) < AppStateProvider.kScopeDiscoveryCompanionVersionCode;
+
 /// Main application state provider
 class AppStateProvider extends ChangeNotifier with WidgetsBindingObserver {
   // Maximum sizes for in-memory lists to prevent unbounded growth during long sessions
@@ -1662,6 +1673,41 @@ class AppStateProvider extends ChangeNotifier with WidgetsBindingObserver {
   int get smartPingDays => _apiService.enforceSmartPing
       ? _apiService.apiSmartPingDays
       : _preferences.smartPingDays;
+
+  /// Companion firmware code (byte 1 of RESP_CODE_DEVICE_INFO) scope
+  /// discovery needs to ask a repeater at all. Below it the setting still
+  /// saves, but nothing is asked and nothing extra goes on the air.
+  static const int kScopeDiscoveryCompanionVersionCode = 13;
+
+  /// Whether scope discovery is forced on by the regional admin (auth
+  /// `scope_discovery`).
+  bool get enforceScopeDiscovery => _apiService.enforceScopeDiscovery;
+
+  /// Effective scope discovery switch: the admin's veto wins over the user,
+  /// same shape as [smartPingEnabled].
+  bool get scopeDiscoveryEnabled =>
+      _apiService.enforceScopeDiscovery || _preferences.scopeDiscoveryEnabled;
+
+  /// Effective refresh window in days: the server's when enforced, else the
+  /// user's.
+  int get scopeRefreshDays => _apiService.enforceScopeDiscovery
+      ? _apiService.apiScopeRefreshDays
+      : _preferences.scopeDiscoveryDays;
+
+  /// Whether scope discovery may actually run right now: the server offered
+  /// it on the last live auth, the effective switch is on, Offline Mode never
+  /// asks, and the connected companion's firmware can carry the request.
+  bool get scopeDiscoveryActive =>
+      _apiService.scopeDiscoveryOffered &&
+      scopeDiscoveryEnabled &&
+      !offlineMode &&
+      (companionFirmwareVersionCode ?? 0) >= kScopeDiscoveryCompanionVersionCode;
+
+  /// Whether the connected radio's firmware is below the scope discovery
+  /// floor. Drives the extra warning line on the Settings switch; see
+  /// [scopeDiscoveryFirmwareTooOld].
+  bool get scopeDiscoveryNeedsNewerFirmware => scopeDiscoveryFirmwareTooOld(
+      connected: isConnected, firmwareCode: companionFirmwareVersionCode);
 
   /// Null means the ordinary all-time overlay. Regional window overrides apply.
   int? get coverageOverlayDays =>

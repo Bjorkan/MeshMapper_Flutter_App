@@ -5,6 +5,7 @@ import '../../models/connection_state.dart';
 import '../../models/user_preferences.dart';
 import '../../providers/app_state_provider.dart';
 import '../../widgets/carpeater_setup_dialog.dart';
+import '../../widgets/scope_discovery_firmware_note.dart';
 import 'settings_section_card.dart';
 
 /// Settings folder: Wardriving.
@@ -156,6 +157,64 @@ class WardrivingSettingsPage extends StatelessWidget {
                         appState.updatePreferences(
                             prefs.copyWith(showDeferredMarkers: value));
                       },
+              ),
+            SwitchListTile(
+              secondary: const Icon(Icons.travel_explore),
+              title: Row(
+                children: [
+                  const Flexible(
+                      child: Text('Scope Discovery',
+                          overflow: TextOverflow.ellipsis)),
+                  const SizedBox(width: 4),
+                  IconButton(
+                    onPressed: () => _showScopeDiscoveryInfo(context),
+                    icon: Icon(
+                      Icons.info_outline,
+                      size: 18,
+                      color: Theme.of(context).colorScheme.onSurfaceVariant,
+                    ),
+                    visualDensity: VisualDensity.compact,
+                    padding: EdgeInsets.zero,
+                    constraints: const BoxConstraints(),
+                  ),
+                ],
+              ),
+              subtitle: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text(
+                    appState.enforceScopeDiscovery
+                        ? 'Set by Regional Admin. Asks nearby repeaters for their scopes. Adds a little airtime; pings are not delayed.'
+                        : 'Asks nearby repeaters for their scopes. Adds a little airtime; pings are not delayed.',
+                    style: appState.enforceScopeDiscovery
+                        ? const TextStyle(color: Colors.amber)
+                        : null,
+                  ),
+                  ScopeDiscoveryFirmwareNote(
+                      show: appState.scopeDiscoveryNeedsNewerFirmware),
+                ],
+              ),
+              value: appState.scopeDiscoveryEnabled,
+              onChanged: (isAutoMode || appState.enforceScopeDiscovery)
+                  ? null
+                  : (value) {
+                      appState.updatePreferences(
+                          prefs.copyWith(scopeDiscoveryEnabled: value));
+                    },
+            ),
+            if (appState.scopeDiscoveryEnabled)
+              ListTile(
+                leading: const Icon(Icons.history),
+                title: const Text('Ask repeaters again after'),
+                subtitle: Text(appState.enforceScopeDiscovery
+                    ? '${_scopeDiscoveryDaysLabel(appState.scopeRefreshDays)} (set by Regional Admin)'
+                    : _scopeDiscoveryDaysLabel(prefs.scopeDiscoveryDays)),
+                trailing: const Icon(Icons.chevron_right),
+                enabled: !isAutoMode && !appState.enforceScopeDiscovery,
+                onTap: (isAutoMode || appState.enforceScopeDiscovery)
+                    ? null
+                    : () => _showScopeDiscoveryDaysSelector(context, appState),
               ),
             SwitchListTile(
               secondary: const Icon(Icons.timer_off),
@@ -711,6 +770,49 @@ class WardrivingSettingsPage extends StatelessWidget {
     );
   }
 
+  void _showScopeDiscoveryInfo(BuildContext context) {
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Row(
+          children: [
+            Icon(Icons.travel_explore, size: 24),
+            SizedBox(width: 8),
+            Text('Scope Discovery'),
+          ],
+        ),
+        content: const SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                'After each discovery, MeshMapper asks the repeaters it found which scopes they carry, and adds the answer to the map. Each repeater is asked at most once per interval, by anyone.',
+                style: TextStyle(fontSize: 14),
+              ),
+              SizedBox(height: 12),
+              Text(
+                'Your radio sends a few short extra messages after each discovery: it asks up to 3 of the strongest repeaters it found, one at a time, and waits a few seconds for each answer. Your pings are not delayed. A small "Scopes" badge shows on the ping button while it is asking, and each request appears in the log under SCP.',
+                style: TextStyle(fontSize: 14),
+              ),
+              SizedBox(height: 12),
+              Text(
+                "It needs companion firmware v1.16.0 or newer, and your region's server must support it.",
+                style: TextStyle(fontSize: 14),
+              ),
+            ],
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(),
+            child: const Text('Got it'),
+          ),
+        ],
+      ),
+    );
+  }
+
   void _showDiscDropInfo(BuildContext context) {
     showDialog(
       context: context,
@@ -1089,6 +1191,62 @@ class WardrivingSettingsPage extends StatelessWidget {
             child: const Text('Save'),
           ),
         ],
+      ),
+    );
+  }
+
+  String _scopeDiscoveryDaysLabel(int days) =>
+      days == 1 ? '1 day' : '$days days';
+
+  void _showScopeDiscoveryDaysSelector(
+      BuildContext context, AppStateProvider appState) {
+    final controller = TextEditingController(
+        text: appState.preferences.scopeDiscoveryDays.toString());
+    String? errorText;
+
+    showDialog(
+      context: context,
+      builder: (context) => StatefulBuilder(
+        builder: (context, setState) => AlertDialog(
+          title: const Text('Ask repeaters again after'),
+          content: TextField(
+            controller: controller,
+            keyboardType: TextInputType.number,
+            autofocus: true,
+            decoration: InputDecoration(
+              suffixText: 'days',
+              helperText:
+                  '${ScopeDiscoveryDays.min} to ${ScopeDiscoveryDays.max} days',
+              errorText: errorText,
+            ),
+            onChanged: (_) {
+              if (errorText != null) setState(() => errorText = null);
+            },
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text('Cancel'),
+            ),
+            FilledButton(
+              onPressed: () {
+                final value = int.tryParse(controller.text.trim());
+                if (value == null ||
+                    value < ScopeDiscoveryDays.min ||
+                    value > ScopeDiscoveryDays.max) {
+                  setState(() => errorText =
+                      'Enter a number from ${ScopeDiscoveryDays.min} to ${ScopeDiscoveryDays.max}');
+                  return;
+                }
+                appState.updatePreferences(
+                  appState.preferences.copyWith(scopeDiscoveryDays: value),
+                );
+                Navigator.pop(context);
+              },
+              child: const Text('Save'),
+            ),
+          ],
+        ),
       ),
     );
   }

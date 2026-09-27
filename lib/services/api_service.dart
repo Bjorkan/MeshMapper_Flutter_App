@@ -162,6 +162,9 @@ class ApiService {
   int _apiHopBytes = 1;
   bool _enforceSmartPing = false;
   int _apiSmartPingDays = 14;
+  bool _scopeDiscoveryOffered = false;
+  bool _enforceScopeDiscovery = false;
+  int _apiScopeRefreshDays = 14;
 
   /// The user's own CARpeater key, sent as `carpeater` on connect and
   /// register auths, never on an offline-mode auth. Null while the CARpeater
@@ -205,6 +208,20 @@ class ApiService {
   /// The Smart Pinging window (days) the server sent; only binding when
   /// [enforceSmartPing] is true. 14 when the field is missing or invalid.
   int get apiSmartPingDays => _apiSmartPingDays;
+
+  /// Whether the last live auth carried the `scope_discovery` key at all.
+  /// The key's PRESENCE is the gate: a server that predates the feature never
+  /// sends it, and the app must never ask a repeater for its scopes without
+  /// it, whatever the user's own switch says.
+  bool get scopeDiscoveryOffered => _scopeDiscoveryOffered;
+
+  /// Whether scope discovery is forced on by the regional admin.
+  bool get enforceScopeDiscovery => _enforceScopeDiscovery;
+
+  /// The scope discovery refresh window (days) the server sent; only binding
+  /// when [enforceScopeDiscovery] is true. 14 when the field is missing or
+  /// non-numeric, floored at 7.
+  int get apiScopeRefreshDays => _apiScopeRefreshDays;
 
   /// Every CARpeater key the region shares, replaced in full on every auth.
   /// Upper-case 64 hex, sorted. Empty when the server sent none or predates
@@ -931,6 +948,21 @@ class ApiService {
                 '[API] Regional admin enforces smart pinging: $_apiSmartPingDays day window');
           }
 
+          // Scope discovery (APP_API.md). The key's PRESENCE is the gate: a
+          // server that predates the feature would store a SCOPES item as a
+          // TX row.
+          _scopeDiscoveryOffered = data.containsKey('scope_discovery');
+          final sd = data['scope_discovery'];
+          _enforceScopeDiscovery = sd == true || sd == 1;
+          final sdDays = data['scope_refresh_days'];
+          _apiScopeRefreshDays = sdDays is num && sdDays.isFinite
+              ? (sdDays.toInt() < 7 ? 7 : sdDays.toInt())
+              : 14;
+          if (_enforceScopeDiscovery) {
+            debugLog(
+                '[SCOPES] Regional admin enforces scope discovery: $_apiScopeRefreshDays day window');
+          }
+
           // Note: Heartbeat is enabled by AppStateProvider when auto mode starts
           // (not on initial auth, since heartbeat is only for auto mode)
         }
@@ -1599,6 +1631,9 @@ class ApiService {
     _apiHopBytes = 1;
     _enforceSmartPing = false;
     _apiSmartPingDays = 14;
+    _scopeDiscoveryOffered = false;
+    _enforceScopeDiscovery = false;
+    _apiScopeRefreshDays = 14;
     _heartbeatTimer?.cancel();
     _heartbeatTimer = null;
     _heartbeatRetryTimer?.cancel();
