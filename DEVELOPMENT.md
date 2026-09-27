@@ -744,7 +744,11 @@ Off by default until a region turns it on.
   `ScopeLifecycle.onGateChanged`) (`ScopeStopEvent` in
   `lib/services/scope_discovery/scope_lifecycle.dart`). Every one of these cancels the
   runner's token at once (no further frame goes out for it), releases a held lease
-  synchronously, and clears the badge. A connection actually going away also drops its list of
+  synchronously, and clears the badge. An Offline Mode switch also blocks new runners for as long as it
+  runs (`ScopeLifecycle.beginModeSwitch` on its first line, before anything is awaited, and
+  `endModeSwitch` when it ends, success or not), because the gate still reads open until
+  Offline Mode is set at the end of the switch and a discovery window closing during its waits
+  would otherwise start a fresh runner. A connection actually going away also drops its list of
   routes still owed a restore (the per-connection `pendingRestores`), and nothing restores them
   on reconnect. **An accepted residual**: a disconnect between the borrow and its restore can
   leave the borrowed zero-hop route on the radio until firmware relearns a path to that

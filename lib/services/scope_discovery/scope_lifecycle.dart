@@ -70,6 +70,7 @@ class ScopeLifecycle {
   ScopeRunner? _live;
   Object? _restoresOwner;
   final List<ContactRecord> _restores = [];
+  int _modeSwitches = 0;
 
   /// [cancelHostRunner] cancels the runner PingService holds;
   /// [onBadgeChanged] is a plain notify (the badge is not on the map).
@@ -99,8 +100,9 @@ class ScopeLifecycle {
     return _restores;
   }
 
-  /// One sweep's runner, or null when the gate is closed, there is no
-  /// connection, or there is neither a device key nor a session id.
+  /// One sweep's runner, or null when the gate is closed, an Offline Mode
+  /// switch is in progress, there is no connection, or there is neither a
+  /// device key nor a session id.
   /// [create] builds it with the device key and the connection's restores.
   ScopeRunner? buildRunner({
     required ScopeGateInputs gate,
@@ -111,6 +113,11 @@ class ScopeLifecycle {
         create,
   }) {
     if (!scopeDiscoveryGateOpen(gate)) return null;
+    if (modeSwitching) {
+      debugLog('[SCOPES] No scope requests this sweep: a mode switch is '
+          'in progress');
+      return null;
+    }
     if (connection == null || deviceKey == null) return null;
     final runner = create(deviceKey, restoresFor(connection));
     _live = runner;
@@ -132,6 +139,27 @@ class ScopeLifecycle {
       _restoresOwner = null;
     }
   }
+
+  /// Starts an Offline Mode switch in either direction ([event] is
+  /// [ScopeStopEvent.offlineSwitch] or [ScopeStopEvent.onlineSwitch]):
+  /// ends any scope work at once, like [onEvent], and builds no runner until
+  /// the matching [endModeSwitch]. Called on the switch's first line, before
+  /// anything is awaited, because the gate still reads open while the switch
+  /// waits (Offline Mode is only set at its end) and a discovery window
+  /// closing then would otherwise start a fresh runner.
+  void beginModeSwitch(ScopeStopEvent event) {
+    _modeSwitches++;
+    onEvent(event);
+  }
+
+  /// Ends a switch started by [beginModeSwitch]; runners are built again
+  /// once every switch in progress has ended.
+  void endModeSwitch() {
+    if (_modeSwitches > 0) _modeSwitches--;
+  }
+
+  /// True while an Offline Mode switch is in progress.
+  bool get modeSwitching => _modeSwitches > 0;
 
   /// Called whenever a gate input changes outside the stop events: a live
   /// `/auth` answer (a session recovery included) that drops or disables

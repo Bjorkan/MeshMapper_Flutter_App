@@ -8064,7 +8064,17 @@ class AppStateProvider extends ChangeNotifier with WidgetsBindingObserver {
   /// Switch from online to offline mode while connected
   Future<({bool success, String? error})> _switchToOfflineMode() async {
     debugLog('[APP] Hot-switching to offline mode while connected');
-    _scopeLifecycle.onEvent(ScopeStopEvent.offlineSwitch);
+    // Before the first await: the gate still reads open until Offline Mode
+    // is set at the end, so no new scope runner may start in between.
+    _scopeLifecycle.beginModeSwitch(ScopeStopEvent.offlineSwitch);
+    try {
+      return await _switchToOfflineModeSteps();
+    } finally {
+      _scopeLifecycle.endModeSwitch();
+    }
+  }
+
+  Future<({bool success, String? error})> _switchToOfflineModeSteps() async {
     _invalidateLiveSessionRecovery();
     await _waitForLiveSessionRecovery();
     _isSwitchingMode = true;
@@ -8140,7 +8150,17 @@ class AppStateProvider extends ChangeNotifier with WidgetsBindingObserver {
   /// Switch from offline to online mode while connected
   Future<({bool success, String? error})> _switchToOnlineMode() async {
     debugLog('[APP] Hot-switching to online mode while connected');
-    _scopeLifecycle.onEvent(ScopeStopEvent.onlineSwitch);
+    // No scope runner starts while the switch runs; the new session's gate
+    // decides once it is over.
+    _scopeLifecycle.beginModeSwitch(ScopeStopEvent.onlineSwitch);
+    try {
+      return await _switchToOnlineModeSteps();
+    } finally {
+      _scopeLifecycle.endModeSwitch();
+    }
+  }
+
+  Future<({bool success, String? error})> _switchToOnlineModeSteps() async {
     _isSwitchingMode = true;
     _modeSwitchError = null;
     var switchSucceeded = false;
@@ -10652,7 +10672,8 @@ class AppStateProvider extends ChangeNotifier with WidgetsBindingObserver {
     );
   }
 
-  /// Mode on, gate active, not airborne, not mid zone transfer or reconnect.
+  /// Mode on, gate active, not airborne, not mid mode switch, zone transfer
+  /// or reconnect.
   bool _scopeStillWanted() {
     final ping = _pingService;
     return ping != null &&
@@ -10661,6 +10682,7 @@ class AppStateProvider extends ChangeNotifier with WidgetsBindingObserver {
         (ping.isPassiveMode || ping.isHybridMode) &&
         scopeDiscoveryActive &&
         !_gpsService.isAirborne &&
+        !_scopeLifecycle.modeSwitching &&
         !_isZoneTransferInProgress &&
         !_isAutoReconnecting;
   }

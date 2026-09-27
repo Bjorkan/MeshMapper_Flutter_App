@@ -212,6 +212,54 @@ void main() {
     });
   });
 
+  group('an Offline Mode switch', () {
+    for (final event in [
+      ScopeStopEvent.offlineSwitch,
+      ScopeStopEvent.onlineSwitch,
+    ]) {
+      test(
+          '${event.name}: a discovery window completing during the switch '
+          'builds no runner', () {
+        fakeAsync((async) {
+          final h = _Harness();
+          final before = h.build()!;
+          before.run([_cand(0x11)], discPersisted: Future<void>.value());
+          async.flushMicrotasks();
+          final frames = List.of(h.radio.frames);
+
+          // The first line of the switch, before anything is awaited: the
+          // gate is still open (Offline Mode is not set yet).
+          h.lifecycle.beginModeSwitch(event);
+          expect(before.isCancelled, isTrue);
+          expect(h.hostCancels, [event.reason]);
+          expect(h.lifecycle.requestActive, isFalse);
+
+          // The session recovery wait: a discovery window closes and asks
+          // for this sweep's runner.
+          async.elapse(const Duration(seconds: 10));
+          expect(h.build(), isNull, reason: 'the switch is still running');
+          async.elapse(const Duration(seconds: 60));
+          expect(h.radio.frames, frames, reason: 'nothing further written');
+
+          // The switch is over and the gate is still open (a failed switch
+          // back to where it started): sweeps get runners again.
+          h.lifecycle.endModeSwitch();
+          expect(h.build(), isNotNull);
+        });
+      });
+    }
+
+    test('an overlapping switch keeps the block until both end', () {
+      final h = _Harness();
+      h.lifecycle.beginModeSwitch(ScopeStopEvent.offlineSwitch);
+      h.lifecycle.beginModeSwitch(ScopeStopEvent.onlineSwitch);
+      h.lifecycle.endModeSwitch();
+      expect(h.build(), isNull);
+      h.lifecycle.endModeSwitch();
+      expect(h.build(), isNotNull);
+    });
+  });
+
   group('borrowed routes', () {
     ContactRecord record() => ContactRecord.newRepeater(
         publicKey: Uint8List.fromList(List.filled(32, 0x11)),
