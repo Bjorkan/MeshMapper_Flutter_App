@@ -7,6 +7,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:mesh_mapper/models/connection_state.dart';
 import 'package:mesh_mapper/models/device_model.dart';
+import 'package:mesh_mapper/models/scope_log_entry.dart';
 import 'package:mesh_mapper/services/api_queue_service.dart';
 import 'package:mesh_mapper/services/countdown_timer_service.dart';
 import 'package:mesh_mapper/services/gps_service.dart';
@@ -14,9 +15,12 @@ import 'package:mesh_mapper/services/meshcore/connection.dart';
 import 'package:mesh_mapper/services/meshcore/protocol_constants.dart';
 import 'package:mesh_mapper/services/meshcore/scope_lease.dart';
 import 'package:mesh_mapper/services/ping_service.dart';
+import 'package:mesh_mapper/services/recent_coverage_service.dart';
 import 'package:mesh_mapper/services/scope_discovery/scope_discovery_rules.dart';
 import 'package:mesh_mapper/services/scope_discovery/scope_runner.dart';
 import 'package:mesh_mapper/services/wakelock_service.dart';
+
+import 'meshcore/scope_test_support.dart' as lease_support;
 
 /// The scope runner rides alongside the discovery schedule and must never
 /// move it: these tests run the real PingService on a fake radio and compare
@@ -84,6 +88,9 @@ class _FakeConnection implements MeshCoreConnection {
   ];
   Duration replyDelay = const Duration(milliseconds: 300);
 
+  /// Runs at the moment a discovery reaches the radio.
+  void Function()? onDiscoveryWrite;
+
   _FakeConnection(this.t0);
 
   int get _ms => clock.now().difference(t0).inMilliseconds;
@@ -121,6 +128,7 @@ class _FakeConnection implements MeshCoreConnection {
 
   @override
   Future<({Uint8List tag, DateTime sentAt})> sendDiscoveryRequest() async {
+    onDiscoveryWrite?.call();
     events.add('disc@$_ms');
     const own = [1, 2, 3, 4];
     for (final r in replies) {
@@ -203,6 +211,11 @@ class _ControlledRadio implements ScopeRadio {
 
   /// Null holds each lease until [endLeasePhase].
   Duration? autoLease = const Duration(milliseconds: 100);
+
+  /// When set, the answer wait ends only when the test completes this, and
+  /// it returns that outcome even after a cancel: an answer that arrives
+  /// after the runner was stopped.
+  Completer<ScopeRequestOutcome>? lateAnswer;
   Completer<void>? _leasePhase;
 
   void endLeasePhase() => _leasePhase?.complete();
@@ -264,6 +277,12 @@ class _Lease implements ScopeLeaseHandle {
     }
     radio.leaseHeld = false;
     radio.inWait = true;
+    final late = radio.lateAnswer;
+    if (late != null) {
+      final outcome = await late.future;
+      radio.inWait = false;
+      return outcome;
+    }
     var wait = answerWait ?? const Duration(seconds: 3);
     final end = clock.now().add(wait);
     if (notAfter.isBefore(end)) wait = notAfter.difference(clock.now());
@@ -284,9 +303,18 @@ class _Scenario {
   final List<({DateTime hardStop, DateTime at, DateTime? earliest})> built = [];
   final List<ScopeRunner> runners = [];
   final List<ScopeCancelToken> tokens = [];
+  final List<ScopeLogEntry> logged = [];
+  int enqueued = 0;
+
+  /// What Smart Pinging answers for every fix (see [smartPing]).
+  RecentCoverage coverage = RecentCoverage.clear;
+
+  /// Runs after every schedule the service announces.
+  void Function(int ms, String? reason)? onScheduled;
   late final PingService ping;
 
-  _Scenario(this.async, {bool withRunner = true, int intervalMs = 30000})
+  _Scenario(this.async,
+      {bool withRunner = true, int intervalMs = 30000, bool smartPing = false})
       : t0 = clock.now() {
     ping = PingService(
       gpsService: gps,
@@ -303,7 +331,9 @@ class _Scenario {
       ..getNextPingCounter = (() => 1)
       ..onAutoPingScheduled = (ms, reason) {
         conn.events.add('sched$ms@${clock.now().difference(t0).inMilliseconds}');
+        onScheduled?.call(ms, reason);
       };
+    if (smartPing) ping.checkRecentCoverage = (_, __) => coverage;
     ping.setAutoPingInterval(intervalMs);
     if (withRunner) {
       ping.scopeRunnerFactory = ({required hardStop, required cancel}) {
@@ -322,12 +352,15 @@ class _Scenario {
           serverInfo: (_) => (onList: false, checkedAt: null),
           cache: ScopeQueryCache.fromJson(null),
           budget: ScopeHourlyBudget(save: (_) async {}),
-          enqueue: (_, __) async => true,
+          enqueue: (_, __) async {
+            enqueued++;
+            return true;
+          },
           nowSec: () => clock.now().millisecondsSinceEpoch ~/ 1000,
           currentPosition: () => null,
           stillWanted: () => true,
           onActiveChanged: badge.add,
-          onLogged: (_) {},
+          onLogged: logged.add,
           pendingRestores: [],
         );
         runners.add(runner);
@@ -620,5 +653,230 @@ void main() {
     stopsAtOnce('cancelScopeRunner',
         (s) => s.ping.cancelScopeRunner('offline switch'));
     stopsAtOnce('dispose', (s) => s.ping.dispose());
+  });
+
+  // Smart Pinging holds a discovery back in a square that is already mapped
+  // and banks it; the bank is released on the first fix in a clear square.
+  // A runner's hard stop is the earliest the next discovery can go out, so
+  // a banked discovery and a live runner meet only at the deferral instant,
+  // before the runner's own hard-stop timer fires at that same moment. The
+  // release below is made from exactly there (a microtask after the
+  // deferral), the one moment the two can overlap.
+  group('alongside Smart Pinging', () {
+    /// Passive with Smart Pinging wired. The first discovery goes out clear
+    /// and starts R1 at 7 s (hard stop 37 s); the 37 s attempt finds the
+    /// square covered and banks. With [release], the bank is let go into a
+    /// clear square from the deferral instant.
+    ({_Scenario s, List<String> log, List<String> atWrite})
+        passiveDeferredAt37(FakeAsync async,
+            {required bool release,
+            Duration? autoLease,
+            Completer<ScopeRequestOutcome>? lateAnswer}) {
+      final log = lease_support.captureScopeLog();
+      final s = _Scenario(async, smartPing: true);
+      s.radio.autoLease = autoLease;
+      s.radio.lateAnswer = lateAnswer;
+      final atWrite = <String>[];
+      s.conn.onDiscoveryWrite = () {
+        if (s.tokens.isEmpty) return; // the first discovery, before R1
+        atWrite.add('${s.ms()}:cancelled=${s.tokens.first.isCancelled}'
+            ':lease=${s.radio.leaseHeld}:asks=${s.radio.asks.length}');
+      };
+      s.onScheduled = (ms, reason) {
+        if (reason != PingService.skipReasonRecentlyCovered) return;
+        atWrite.add('deferred@${s.ms()}:cancelled=${s.tokens.first.isCancelled}');
+        if (!release) return;
+        scheduleMicrotask(() {
+          s.coverage = RecentCoverage.clear;
+          final released = s.ping.maybeSendBankedPing(_pos(46.0, -75.0));
+          atWrite.add('released=$released');
+        });
+      };
+      s.ping.enableAutoPing(passiveMode: true);
+      async.elapse(const Duration(seconds: 8));
+      expect(s.built, hasLength(1));
+      expect(s.built.single.hardStop, s.t0.add(const Duration(seconds: 37)));
+      s.coverage = RecentCoverage.covered;
+      async.elapse(const Duration(milliseconds: 28999)); // 36.999 s
+      return (s: s, log: log, atWrite: atWrite);
+    }
+
+    test('a banked discovery released while the runner waits for an answer '
+        'cancels it before the write, and its late answer is ignored', () {
+      fakeAsync((async) {
+        final late = Completer<ScopeRequestOutcome>();
+        final t = passiveDeferredAt37(async,
+            release: true,
+            autoLease: const Duration(milliseconds: 100),
+            lateAnswer: late);
+        final s = t.s;
+        expect(s.radio.inWait, isTrue, reason: 'R1 is waiting for an answer');
+        expect(s.ping.isScopeRunnerActive, isTrue);
+        async.elapse(const Duration(milliseconds: 1)); // 37 s
+        expect(t.atWrite, [
+          'deferred@37000:cancelled=false',
+          'released=true',
+          startsWith('37000:cancelled=true'),
+        ]);
+        expect(
+            t.log.where((l) => l.contains('Runner stopped: next discovery')),
+            hasLength(1));
+        expect(t.log.where((l) => l.contains('Runner stopped: hard stop')),
+            isEmpty);
+        // The answer lands after the cancel: the runner drops it.
+        final loggedBefore = s.logged.length;
+        late.complete(ScopeAnswered(
+            Uint8List.fromList([0, 0, 0, 0, 0x41]), clock.now()));
+        s.radio.lateAnswer = null;
+        async.flushMicrotasks();
+        expect(s.enqueued, 0);
+        expect(s.logged.length, loggedBefore);
+        s.ping.forceDisableAutoPing();
+        async.flushMicrotasks();
+      }, initialTime: DateTime(2026, 9, 26, 10));
+    });
+
+    test('the same release while the runner holds the lease: the discovery '
+        'goes out once the lease is gone, and R1 writes nothing more', () {
+      fakeAsync((async) {
+        final t = passiveDeferredAt37(async, release: true);
+        final s = t.s;
+        expect(s.radio.leaseHeld, isTrue, reason: 'R1 holds the radio');
+        final asksBefore = s.radio.asks.length;
+        async.elapse(const Duration(milliseconds: 1)); // 37 s
+        expect(t.atWrite, [
+          'deferred@37000:cancelled=false',
+          'released=true',
+          '37000:cancelled=true:lease=false:asks=$asksBefore',
+        ]);
+        // R2 only starts once the released discovery's window closes at
+        // 44 s; nothing is asked between the cancel and that.
+        async.elapse(const Duration(milliseconds: 6900));
+        expect(s.built, hasLength(1));
+        expect(s.radio.asks.length, asksBefore);
+        s.ping.forceDisableAutoPing();
+        async.flushMicrotasks();
+      }, initialTime: DateTime(2026, 9, 26, 10));
+    });
+
+    test('a deferred discovery does not cancel the runner, which ends at its '
+        'own hard stop, and starts no new runner', () {
+      fakeAsync((async) {
+        // R1 holds the radio through the deferral.
+        final t = passiveDeferredAt37(async, release: false);
+        final s = t.s;
+        expect(s.radio.leaseHeld, isTrue);
+        async.elapse(const Duration(milliseconds: 1)); // 37 s
+        expect(t.atWrite, ['deferred@37000:cancelled=false']);
+        expect(s.tokens.single.isCancelled, isTrue);
+        expect(s.ping.isScopeRunnerActive, isFalse);
+        expect(t.log.where((l) => l.contains('Runner stopped: hard stop')),
+            hasLength(1));
+        expect(
+            t.log.where((l) => l.contains('Runner stopped: next discovery')),
+            isEmpty);
+        // Still covered: the 67 s attempt defers too. No window, no runner.
+        async.elapse(const Duration(seconds: 33));
+        expect(s.conn.events.where((e) => e.startsWith('disc@')), ['disc@0']);
+        expect(s.built, hasLength(1));
+        expect(s.ping.bankedPing, BankedPingType.discovery);
+        s.ping.forceDisableAutoPing();
+        async.flushMicrotasks();
+      }, initialTime: DateTime(2026, 9, 26, 10));
+    });
+
+    // The fakes above cannot show the radio's own lease gate, so this runs
+    // the same order the release takes (cancel the runner, then write the
+    // discovery) on a real connection, with the discovery already queued
+    // behind a held lease.
+    test('on a real connection, a discovery queued behind a lease goes out '
+        'as soon as the cancel releases it, and no scope frame follows', () {
+      lease_support.onScopeClock(lease_support.ScopeRadio.new, (async, radio, conn) {
+        final cancel = ScopeCancelToken();
+        final lease = lease_support.grant(async, conn, cancel: cancel)!;
+        final granted = clock.now();
+        var sent = false;
+        conn.sendDiscoveryRequest().then((_) => sent = true);
+        async.flushMicrotasks();
+        expect(radio.commands, isNot(contains(CommandCodes.sendControlData)),
+            reason: 'queued at the lease gate');
+        async.elapse(const Duration(seconds: 1));
+        expect(radio.commands, isNot(contains(CommandCodes.sendControlData)));
+
+        final before = radio.commands.length;
+        cancel.cancel();
+        async.flushMicrotasks();
+        expect(lease.active, isFalse);
+        expect(radio.commands.skip(before), [CommandCodes.sendControlData]);
+        expect(clock.now().difference(granted),
+            lessThan(const Duration(seconds: 4)));
+
+        // The cancelled lease writes nothing more.
+        ScopeRequestOutcome? outcome;
+        lease
+            .requestScopes(lease_support.scopeKey(0xAB), Uint8List.fromList([1, 0]),
+                answerWait: const Duration(seconds: 3),
+                notAfter: clock.now().add(const Duration(seconds: 30)))
+            .then((o) => outcome = o);
+        radio.emit([ResponseCodes.ok]);
+        async.elapse(const Duration(seconds: 5));
+        expect(outcome, isNotNull);
+        expect(radio.commands.skip(before), [CommandCodes.sendControlData]);
+        expect(sent, isTrue);
+      });
+    });
+
+    test('Hybrid with the TX leg deferred: the hard stop still lands before '
+        'the next discovery goes out', () {
+      for (final interval in [15000, 30000]) {
+        fakeAsync((async) {
+          final log = lease_support.captureScopeLog();
+          final s = _Scenario(async, intervalMs: interval, smartPing: true);
+          s.radio.autoLease = null; // R1 would hold the radio indefinitely
+          final atWrite = <String>[];
+          var txDeferred = 0;
+          s.onScheduled = (ms, reason) {
+            if (reason == PingService.skipReasonRecentlyCovered) {
+              txDeferred++;
+              // Only the TX leg is covered: the discovery leg goes out.
+              s.coverage = RecentCoverage.clear;
+            }
+          };
+          s.conn.onDiscoveryWrite = () {
+            if (s.tokens.isEmpty) return;
+            atWrite.add('${s.ms()}:cancelled=${s.tokens.first.isCancelled}'
+                ':lease=${s.radio.leaseHeld}');
+          };
+          s.ping.enableAutoPing(hybridMode: true);
+          // Until R1 is built, then cover the TX leg that follows.
+          while (s.built.isEmpty) {
+            async.elapse(const Duration(milliseconds: 100));
+          }
+          s.coverage = RecentCoverage.covered;
+          final hardStop = s.built.single.hardStop;
+          final earliest = s.built.single.earliest!;
+          expect(hardStop.isAfter(earliest), isFalse,
+              reason: 'interval $interval');
+          async.elapse(earliest.difference(clock.now()) +
+              const Duration(seconds: 1));
+          expect(txDeferred, 1, reason: 'interval $interval');
+          expect(s.conn.events.where((e) => e.startsWith('tx@')), isEmpty);
+          final earliestMs = earliest.difference(s.t0).inMilliseconds;
+          // The TX leg deferred with no RX window, so the discovery leg goes
+          // out exactly at the earliest the runner was built against, and
+          // the runner is already stopped when it does.
+          expect(atWrite, ['$earliestMs:cancelled=true:lease=false'],
+              reason: 'interval $interval');
+          expect(log.where((l) => l.contains('Runner stopped: hard stop')),
+              hasLength(1));
+          expect(
+              log.where((l) => l.contains('Runner stopped: next discovery')),
+              isEmpty,
+              reason: 'the hard stop, not the send, ended R1');
+          s.ping.forceDisableAutoPing();
+          async.flushMicrotasks();
+        }, initialTime: DateTime(2026, 9, 26, 10));
+      }
+    });
   });
 }
