@@ -80,6 +80,15 @@ class Repeater {
   /// never polled.
   final double? backboneShare;
 
+  /// When the server last asked this repeater for its scopes, across every
+  /// phone (Unix seconds), or null when it has never been asked or the
+  /// server predates the field. Read by `isScopeQueryDue`'s server-side rule
+  /// so a repeater the server already checked recently is not asked again
+  /// just because this phone has no cached answer of its own. Non-numeric or
+  /// missing reads null, never logged: an ordinary case for an older server
+  /// or a repeater this feature has not reached yet.
+  final int? scopesCheckedAt;
+
   /// The site details an administrator fills in about their installation.
   /// Every one is additive, optional and free text the server does not
   /// validate, so they are null on most repeaters and on any server that
@@ -132,6 +141,7 @@ class Repeater {
     this.admins = const [],
     this.backbone = false,
     this.backboneShare,
+    this.scopesCheckedAt,
     this.hardware,
     this.antenna,
     this.heightMeters,
@@ -192,6 +202,16 @@ class Repeater {
     final backboneShare =
         shareValue == null || !shareValue.isFinite ? null : shareValue.toDouble();
 
+    // Non-numeric or missing is null, never logged: an older server simply
+    // predates the field, and a repeater this feature has not reached yet is
+    // the expected common case.
+    final rawScopesCheckedAt = json['scopes_checked_at'];
+    final scopesCheckedAt = rawScopesCheckedAt is int
+        ? rawScopesCheckedAt
+        : rawScopesCheckedAt is num
+            ? rawScopesCheckedAt.toInt()
+            : null;
+
     final rawHopBytes = json['hop_bytes'];
     final hopBytes = rawHopBytes is num
         ? rawHopBytes.toInt()
@@ -243,6 +263,7 @@ class Repeater {
       admins: admins,
       backbone: backbone,
       backboneShare: backboneShare,
+      scopesCheckedAt: scopesCheckedAt,
       hardware: text('hardware'),
       antenna: text('antenna'),
       heightMeters: heightMeters,
@@ -274,6 +295,7 @@ class Repeater {
       // means not backbone" shape the server sends.
       if (backbone) 'backbone': 1,
       if (backboneShare != null) 'backbone_share': backboneShare,
+      if (scopesCheckedAt != null) 'scopes_checked_at': scopesCheckedAt,
       // Same rule for the site details: absent means "not filled in", so an
       // unset one must not come back as an explicit null.
       if (hardware != null) 'hardware': hardware,
@@ -427,6 +449,7 @@ class Repeater {
     List<String>? admins,
     bool? backbone,
     double? backboneShare,
+    int? scopesCheckedAt,
     String? hardware,
     String? antenna,
     double? heightMeters,
@@ -453,6 +476,7 @@ class Repeater {
         admins: admins ?? this.admins,
         backbone: backbone ?? this.backbone,
         backboneShare: backboneShare ?? this.backboneShare,
+        scopesCheckedAt: scopesCheckedAt ?? this.scopesCheckedAt,
         hardware: hardware ?? this.hardware,
         antenna: antenna ?? this.antenna,
         heightMeters: heightMeters ?? this.heightMeters,
