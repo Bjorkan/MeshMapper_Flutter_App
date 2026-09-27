@@ -829,6 +829,122 @@ void main() {
     });
   });
 
+  group('reply expiry', () {
+    /// A first request whose lookup is never answered: the lease ends at
+    /// 4 s and the lookup's owed reply expires unanswered at 10 s.
+    void expireAnUnansweredLookup(
+        FakeAsync async, ScopeRadio radio, MeshCoreConnection conn) {
+      final first = grant(async, conn)!;
+      ask(async, first);
+      expect(radio.commands.last, CommandCodes.getContactByKey);
+      async.elapse(const Duration(seconds: 4));
+      expect(first.active, isFalse);
+      expect(conn.hasScopeReplyDebt, isTrue);
+      async.elapse(const Duration(seconds: 7));
+      expect(conn.hasScopeReplyDebt, isFalse,
+          reason: 'the lookup reply expired unanswered');
+    }
+
+    int anonRequests(ScopeRadio radio) =>
+        radio.commands.where((c) => c == CommandCodes.sendAnonReq).length;
+
+    test(
+        'an old lookup ERR_NOT_FOUND after its debt expired never sends to a '
+        'saved flood-route contact', () {
+      final lines = captureScopeLog();
+      onScopeClock(ScopeRadio.new, (async, radio, conn) {
+        expireAnUnansweredLookup(async, radio, conn);
+        expect(conn.isScopeDiscoverySuspended, isTrue);
+
+        final second = grant(async, conn);
+        if (second != null) {
+          ask(async, second);
+          // The old lookup's late ERR_NOT_FOUND, then the new lookup's real
+          // CONTACT (a saved contact with no route), then its SENT.
+          radio.emit([ResponseCodes.err, ErrorCodes.notFound]);
+          async.flushMicrotasks();
+          radio.emit(contactFrame(scopeContactPayload(
+              pubkey: key, outPathLen: 0xFF, outPath: const [])));
+          radio.emit(sentFrame(flood: true));
+          async.elapse(const Duration(seconds: 5));
+        }
+        expect(anonRequests(radio), 0,
+            reason: 'command 57 must never be written');
+        expect(second, isNull);
+        async.elapse(const Duration(minutes: 2));
+        expect(grant(async, conn), isNull,
+            reason: 'suspended for the rest of the connection');
+      });
+      expect(
+          lines
+              .where((l) =>
+                  l.contains('[SCOPES]') && l.contains('out of step'))
+              .length,
+          1);
+      // A new connection object starts in step.
+      onScopeClock(ScopeRadio.new, (async, radio, conn) {
+        expect(grant(async, conn), isNotNull);
+      });
+    });
+
+    test(
+        'a stale zero-hop CONTACT after the debt expired is never taken as '
+        'the new lookup answer', () {
+      onScopeClock(ScopeRadio.new, (async, radio, conn) {
+        expireAnUnansweredLookup(async, radio, conn);
+
+        final second = grant(async, conn);
+        if (second != null) {
+          ask(async, second);
+          // The old lookup's CONTACT (zero hop at the time), though the
+          // radio's route is now 0xFF: the lease would skip the borrow.
+          radio.emit(contactFrame(
+              scopeContactPayload(pubkey: key, outPathLen: 0, outPath: const [])));
+          async.flushMicrotasks();
+          radio.emit(contactFrame(scopeContactPayload(
+              pubkey: key, outPathLen: 0xFF, outPath: const [])));
+          radio.emit(sentFrame(flood: true));
+          async.elapse(const Duration(seconds: 5));
+        }
+        expect(anonRequests(radio), 0,
+            reason: 'command 57 must never be written');
+        expect(second, isNull);
+      });
+    });
+
+    test('a lease waiting out the debt is refused once it expires', () {
+      onScopeClock(ScopeRadio.new, (async, radio, conn) {
+        conn.setFloodScope(flood16);
+        async.flushMicrotasks();
+        ScopeLease? lease;
+        var done = false;
+        conn
+            .acquireScopeLease(
+                admissionWait: const Duration(seconds: 15),
+                cancel: ScopeCancelToken())
+            .then((l) {
+          lease = l;
+          done = true;
+        });
+        async.elapse(const Duration(seconds: 11));
+        expect(done, isTrue);
+        expect(lease, isNull);
+      });
+    });
+
+    test('a debt answered in time leaves scope work running', () {
+      onScopeClock(ScopeRadio.new, (async, radio, conn) {
+        conn.setFloodScope(flood16);
+        async.flushMicrotasks();
+        async.elapse(const Duration(seconds: 9));
+        radio.emit([ResponseCodes.ok]);
+        async.elapse(const Duration(seconds: 30));
+        expect(conn.isScopeDiscoverySuspended, isFalse);
+        expect(grant(async, conn), isNotNull);
+      });
+    });
+  });
+
   group('cancellation', () {
     test('a cancel before the borrow write puts no further byte on the air',
         () {

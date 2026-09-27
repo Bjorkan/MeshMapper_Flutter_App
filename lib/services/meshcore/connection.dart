@@ -636,6 +636,11 @@ class MeshCoreConnection {
   // connection is rebuilt.
   bool _scopeSuspended = false;
 
+  // An owed reply expired unanswered: the app can no longer tell which later
+  // reply answers which command, so scope discovery stays off until the
+  // connection is rebuilt.
+  bool _replySyncLost = false;
+
   // A reboot or reset was written: the radio is going away, so no lease is
   // admitted on this connection object again (a reconnect builds a new one).
   bool _radioRestarting = false;
@@ -1456,9 +1461,11 @@ class MeshCoreConnection {
       _scopeListenToken != null &&
       identical(_adminCommandInFlight, _scopeListenToken);
 
-  /// True once a contact stream went silent, or a reboot or reset was
-  /// written; no lease is admitted for the rest of this connection.
-  bool get isScopeDiscoverySuspended => _scopeSuspended || _radioRestarting;
+  /// True once a contact stream went silent, an owed reply expired
+  /// unanswered, or a reboot or reset was written; no lease is admitted for
+  /// the rest of this connection.
+  bool get isScopeDiscoverySuspended =>
+      _scopeSuspended || _replySyncLost || _radioRestarting;
 
   bool get _scopeOwnsSlot {
     final owner = _adminCommandInFlight;
@@ -1524,6 +1531,7 @@ class MeshCoreConnection {
     if (epoch != _scopeEpoch) return 'connection closed';
     if (cancel.isCancelled) return 'cancelled';
     if (_scopeSuspended) return 'suspended after a silent contact stream';
+    if (_replySyncLost) return 'suspended after an owed reply expired';
     if (_radioRestarting) return 'a reboot or reset was sent to the radio';
     return null;
   }
@@ -2231,6 +2239,15 @@ class MeshCoreConnection {
         if (_repliesOwed.remove(entry)) {
           debugLog('[CONN] No reply to command ${entry.command} within '
               '${replyOwedExpiry.inSeconds}s, dropped from the reply ledger');
+          // The reply may still come, and nothing says which later frame
+          // answers which command: a stale ERR_NOT_FOUND or CONTACT could be
+          // taken as a new lookup's answer and skip the zero-hop borrow.
+          if (!_replySyncLost) {
+            _replySyncLost = true;
+            debugWarn('[SCOPES] Replies out of step after command '
+                '${entry.command} went unanswered; scope discovery '
+                'suspended until reconnect');
+          }
         }
       });
     }
@@ -2307,6 +2324,7 @@ class MeshCoreConnection {
     _contactsStreamWatchdog = null;
     _contactsStream = ContactsStreamState.none;
     _scopeSuspended = false;
+    _replySyncLost = false;
   }
 
   /// Queues a claim on the next OK or ERR for a send about to hit the wire.

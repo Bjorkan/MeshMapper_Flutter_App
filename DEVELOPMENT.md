@@ -671,7 +671,12 @@ Off by default until a region turns it on.
   its own, which must also have ended. A self telemetry request owes one reply too, but that
   reply is the telemetry push 0x8B rather than a frame below 0x80. A reboot, factory reset or
   CLI reboot owes none, since the radio goes away. So a lease is never granted while anything
-  is still owed an answer. **The write gate**: exactly as a `CMD_SIGN_DATA`
+  is still owed an answer. An owed reply that expires unanswered (10 seconds after its write,
+  `kReplyOwedExpiry`) may still arrive later, and from then on nothing tells which reply answers
+  which command: a stale `ERR_NOT_FOUND` or `CONTACT` could be taken as a new lookup's answer
+  and skip the zero-hop borrow. So the first expiry suspends scope discovery for the rest of
+  that connection (logged once under `[SCOPES]`), exactly as a contact stream silent for 60
+  seconds does; wardriving is untouched, and a reconnect (a new connection object) clears it. **The write gate**: exactly as a `CMD_SIGN_DATA`
   write queues every other write behind `_signGate` (see MyMeshMapper Account), a granted lease
   opens its own gate the same way: every OTHER write queues behind it and goes out once the
   lease releases, while the lease's own commands skip that queue and go straight to the
