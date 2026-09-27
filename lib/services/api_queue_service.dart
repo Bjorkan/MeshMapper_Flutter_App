@@ -1188,8 +1188,13 @@ class ApiQueueService {
         // already written off one more chance.
         _reviveFailedItems();
         onUploadSuccess?.call(uploadedCount, items);
-        // Fire-and-forget: forward to custom API endpoint
-        customApiService?.forwardPings(pings);
+        // Fire-and-forget: forward to custom API endpoint. A withdrawal
+        // that landed while this batch was in flight made the replay leave
+        // its SCOPES out (ApiService.submitWardriveData), so leave them out
+        // here too: a withdrawn answer is never forwarded.
+        customApiService?.forwardPings(scopesAllowedGetter?.call() == false
+            ? withoutScopesItems(pings)
+            : pings);
       } else if (result == UploadResult.nonRetryable) {
         // Data is permanently invalid — discard
         for (final item in hiveItems) {
