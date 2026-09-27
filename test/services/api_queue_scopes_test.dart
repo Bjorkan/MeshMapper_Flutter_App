@@ -339,8 +339,9 @@ void main() {
     });
 
     test(
-        'a failed Hive write recovers (deletes and reopens the box) and '
-        'the retry lands in the fresh box', () async {
+        'a failed Hive write recovers (deletes and reopens the box), and '
+        'the SCOPES retry is refused because recovery wiped the queue',
+        () async {
       final dir = await Directory.systemTemp.createTemp('mm_scopes_');
       Hive.init(dir.path);
       try {
@@ -362,13 +363,14 @@ void main() {
           expectedGeneration: queue.generation,
         );
 
-        expect(ok, isTrue);
-        expect(queue.queueSize, 1);
-        // The recovered box is fresh (deleted from disk and reopened), and
-        // the retry-write landed in it, not in memory.
+        // Recovery deleted the box from disk, which is a new queue
+        // generation: the answer may depend on a DISC that went with it.
+        expect(ok, isFalse);
+        expect(queue.queueSize, 0);
+        // The recovered box is fresh and open, and nothing landed in it.
+        expect(queue.testBox!.isOpen, isTrue);
         final reopened = await Hive.openBox<ApiQueueItem>('api_queue');
-        expect(reopened.length, 1);
-        expect(reopened.getAt(0)!.type, 'SCOPES');
+        expect(reopened.length, 0);
       } finally {
         await Hive.close();
         await dir.delete(recursive: true);
@@ -473,55 +475,44 @@ void main() {
         });
       }
 
+      // A clear racing the recovered retry, or the memory fallback after
+      // it, can no longer be reached from here: recovery is itself a new
+      // generation, so enqueueScopes refuses before the retry runs. The
+      // checks stay in place as a guard should that ever change.
+
+      // Recovery deletes the queue box from disk, which erases every item
+      // in it just as a clear does. A SCOPES whose DISC was in that box
+      // must not land after it: selection would read the missing DISC as
+      // already delivered and upload an answer the server refuses, while
+      // the runner stamps its cache and stops asking for the whole window.
       test(
-          'retry: the recovered write lands after the clear, is undone, and '
-          'nothing is inserted', () async {
+          'recovery: a DISC queued in the box that recovery wipes refuses its '
+          'SCOPES retry, and nothing is inserted', () async {
         final queue = newQueue();
-        final gen = queue.generation;
-        final failing = _ScriptedBox(null)..failAdd = true;
-        final recovered = _ScriptedBox(recoveredInner)
-          // The clear lands while the retry write is pending, then the
-          // retry itself succeeds.
-          ..beforeAdd = () => queue.clearOnDisconnect();
+        final discInner = await Hive.openBox<ApiQueueItem>('scopes_failing');
+        final failing = _ScriptedBox(discInner);
+        final recovered = _ScriptedBox(recoveredInner);
         queue.testBox = failing;
         queue.reopenBoxForRecovery = () async => recovered;
 
+        await enqueueDisc(queue);
+        expect(discInner.values.single.type, 'DISC');
+        final gen = queue.generation;
+        failing.failAdd = true;
+
         final ok = await enqueue(queue, gen);
 
-        expect(ok, isFalse);
-        expect(recovered.addCalls, 1, reason: 'the retry did run');
-        expect(recoveredInner.length, 0,
-            reason: 'the late retry write must be undone');
+        expect(ok, isFalse,
+            reason: 'enqueue false is what keeps the runner from stamping');
+        expect(queue.generation, isNot(gen));
+        expect(recovered.addCalls, 0,
+            reason: 'the retry must not run against the wiped queue');
+        expect(recoveredInner.length, 0);
         expect(queue.heldItems, isEmpty);
       });
 
-      test(
-          'memory fallback: the retry also fails after the clear, and the '
-          'item is not put in memory', () async {
-        final queue = newQueue();
-        final gen = queue.generation;
-        final failing = _ScriptedBox(null)..failAdd = true;
-        Future<void>? clearing;
-        final recovered = _ScriptedBox(recoveredInner)
-          ..failAdd = true
-          ..beforeAdd = () async {
-            clearing = queue.clearOnDisconnect();
-          };
-        queue.testBox = failing;
-        queue.reopenBoxForRecovery = () async => recovered;
-
-        final ok = await enqueue(queue, gen);
-        await clearing;
-
-        expect(ok, isFalse);
-        expect(recovered.addCalls, 1);
-        expect(queue.heldItems, isEmpty,
-            reason: 'nothing may land in the memory fallback');
-        expect(queue.queueSize, 0);
-      });
-
-      test('control: with no clear, the recovered retry lands in Hive and '
-          'returns true', () async {
+      test('with no clear, a recovery on its own still refuses the retry: '
+          'the box it wiped was the queue', () async {
         final queue = newQueue();
         final failing = _ScriptedBox(null)..failAdd = true;
         final recovered = _ScriptedBox(recoveredInner);
@@ -530,23 +521,12 @@ void main() {
 
         final ok = await enqueue(queue, queue.generation);
 
-        expect(ok, isTrue);
-        expect(recoveredInner.values.single.type, 'SCOPES');
+        expect(ok, isFalse);
+        expect(recovered.addCalls, 0);
+        expect(recoveredInner.length, 0);
+        expect(queue.heldItems, isEmpty);
       });
 
-      test('control: with no clear, the same failing path still falls back '
-          'to memory and returns true', () async {
-        final queue = newQueue();
-        final failing = _ScriptedBox(null)..failAdd = true;
-        final recovered = _ScriptedBox(recoveredInner)..failAdd = true;
-        queue.testBox = failing;
-        queue.reopenBoxForRecovery = () async => recovered;
-
-        final ok = await enqueue(queue, queue.generation);
-
-        expect(ok, isTrue);
-        expect(queue.heldItems.single.type, 'SCOPES');
-      });
     });
 
     group('offline mode', () {

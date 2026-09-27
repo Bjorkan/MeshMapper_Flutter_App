@@ -460,6 +460,13 @@ class ApiQueueService {
         debugWarn('[API QUEUE] Failed to close corrupt box: $e');
       }
 
+      // Deleting the box erases every queued item, exactly as a clear does,
+      // so it is a new generation. Bumped before the delete, like the clear
+      // paths: a SCOPES whose DISC sat in this box would otherwise be
+      // accepted by its retry and uploaded as if the DISC had gone out.
+      _bumpGeneration();
+      debugLog('[API QUEUE] Queue generation bumped for storage recovery');
+
       // Delete from disk and reopen
       await Hive.deleteBoxFromDisk(_boxName);
       onStorageCleanup?.call('Queue storage was corrupted and has been reset');
