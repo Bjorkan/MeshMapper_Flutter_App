@@ -5,6 +5,7 @@ import 'package:hive/hive.dart';
 
 import '../models/api_queue_item.dart';
 import '../utils/debug_logger_io.dart';
+import '../utils/public_key.dart';
 import 'api_service.dart';
 import 'custom_api_service.dart';
 import 'network_state_service.dart';
@@ -108,6 +109,86 @@ List<Map<String, dynamic>> withoutScopesItems(
   return rows.where((r) => r['type'] != 'SCOPES').toList();
 }
 
+/// Result of [runOfflineChunkedUpload].
+class OfflineChunkedUploadResult {
+  /// The rows actually offered for upload, after the SCOPES strip and the
+  /// DISC-before-SCOPES reorder. This is also what was handed to
+  /// `persistRows` whenever the original rows held any SCOPES row, so it is
+  /// what the caller's prefix-by-uploaded-count cleanup must read against.
+  final List<Map<String, dynamic>> orderedRows;
+
+  /// How many of [orderedRows], counting from the start, were successfully
+  /// uploaded before the first chunk that was not.
+  final int uploadedCount;
+
+  /// How many SCOPES rows were stripped because the upload auth did not
+  /// offer scope discovery (0 when it did).
+  final int removedScopesCount;
+
+  const OfflineChunkedUploadResult({
+    required this.orderedRows,
+    required this.uploadedCount,
+    required this.removedScopesCount,
+  });
+}
+
+/// Orchestrates an offline session's chunked upload, kept free of network
+/// and storage specifics so it is testable without an `AppStateProvider`.
+///
+/// Strips every SCOPES row when [scopeDiscoveryOffered] is false, then moves
+/// every remaining SCOPES row after every other row (DISC before SCOPES, a
+/// stable partition, [orderDiscBeforeScopes]). When [rows] held ANY SCOPES
+/// row, the resulting order is handed to [persistRows] BEFORE the first
+/// chunk is built: the caller's partial-upload cleanup later removes a
+/// PREFIX of the stored rows by uploaded count, and that prefix only lines
+/// up with what was actually sent when the stored file holds the same order
+/// that was chunked. A session with no SCOPES rows at all skips the write
+/// (the stored order already matches, since stripping and reordering are
+/// both no-ops with nothing to strip or reorder).
+///
+/// [uploadChunk] is called once per fixed-size chunk, in order, with the
+/// chunk's rows, its 1-based number and the total chunk count; it must
+/// perform whatever retry the caller wants and return true only on an
+/// eventual success. The loop stops at the first chunk that returns false,
+/// so every row from that chunk on is left un-uploaded.
+Future<OfflineChunkedUploadResult> runOfflineChunkedUpload(
+  List<Map<String, dynamic>> rows, {
+  required bool scopeDiscoveryOffered,
+  required int batchSize,
+  required Future<void> Function(List<Map<String, dynamic>> orderedRows)
+      persistRows,
+  required Future<bool> Function(
+    List<Map<String, dynamic>> chunk,
+    int chunkNumber,
+    int totalChunks,
+  ) uploadChunk,
+}) async {
+  final stripped = scopeDiscoveryOffered ? rows : withoutScopesItems(rows);
+  final removedScopesCount = rows.length - stripped.length;
+  final ordered = orderDiscBeforeScopes(stripped);
+
+  if (rows.any((r) => r['type'] == 'SCOPES')) {
+    await persistRows(ordered);
+  }
+
+  final totalChunks =
+      ordered.isEmpty ? 0 : (ordered.length + batchSize - 1) ~/ batchSize;
+  var uploadedCount = 0;
+  for (var i = 0; i < ordered.length; i += batchSize) {
+    final chunkNumber = (i ~/ batchSize) + 1;
+    final chunk = ordered.skip(i).take(batchSize).toList();
+    final ok = await uploadChunk(chunk, chunkNumber, totalChunks);
+    if (!ok) break;
+    uploadedCount += chunk.length;
+  }
+
+  return OfflineChunkedUploadResult(
+    orderedRows: ordered,
+    uploadedCount: uploadedCount,
+    removedScopesCount: removedScopesCount,
+  );
+}
+
 /// API queue service with batch upload and retry logic
 /// Ported from apiQueue and batchUpload() in wardrive.js
 ///
@@ -159,17 +240,25 @@ class ApiQueueService {
   // RX buffer for grouping by repeater
   final Map<String, List<ApiQueueItem>> _rxBuffer = {};
 
-  /// Bumped every time the queue is cleared on disconnect
-  /// ([clearOnDisconnect]). A scope discovery answer's send and its enqueue
-  /// are separated by a mesh round trip, so the queue can be cleared out
-  /// from under a call that is still in flight; the caller reads this before
-  /// starting and passes it back so a late insertion can tell whether the
-  /// queue it was aimed at still exists.
+  /// Bumped every time the queue is cleared ([clear], [clearBeforeConnect],
+  /// [clearOnDisconnect], and the stale-item sweep in [init]). A scope
+  /// discovery answer's send and its enqueue are separated by a mesh round
+  /// trip, so the queue can be cleared out from under a call that is still
+  /// in flight; the caller reads this before starting and passes it back so
+  /// a late insertion can tell whether the queue it was aimed at still
+  /// exists.
   int _generation = 0;
 
   /// The current queue generation. Read before a scope answer's send, then
   /// passed back to [enqueueScopes] as `expectedGeneration`.
   int get generation => _generation;
+
+  /// Bumps [generation]. Called FIRST by every clear path, before the clear
+  /// itself, so a write already in flight against the old generation sees
+  /// the new one before (or regardless of whether) the clear it raced
+  /// finishes, and cannot resurrect a stale item into a queue that is being
+  /// or has just been emptied.
+  void _bumpGeneration() => _generation++;
 
   /// Callback for queue updates
   void Function(int queueSize)? onQueueUpdated;
@@ -266,6 +355,7 @@ class ApiQueueService {
 
     // ALWAYS START FRESH - clear any leftover pings from previous sessions
     // Pings without a valid session cannot be uploaded, so delete them
+    _bumpGeneration();
     try {
       if (_box != null && _box!.isNotEmpty) {
         debugLog(
@@ -724,19 +814,29 @@ class ApiQueueService {
     required double lon,
     required int timestamp,
     required int expectedGeneration,
+    String? radioFreq,
   }) async {
     if (!lat.isFinite || !lon.isFinite) {
       debugWarn('[API QUEUE] SCOPES dropped: non-finite lat/lon');
       return false;
     }
 
+    // The server rejects the whole item unless this is exactly 64
+    // upper-case hex; refuse here rather than upload something it will
+    // discard silently.
+    final normalizedKey = normalizePublicKey(publicKeyHex);
+    if (normalizedKey == null) {
+      debugWarn('[API QUEUE] SCOPES dropped: invalid public key');
+      return false;
+    }
+
     final item = ApiQueueItem.fromScopes(
-      publicKeyHex: publicKeyHex,
+      publicKeyHex: normalizedKey,
       scopes: scopes,
       lat: lat,
       lon: lon,
       timestamp: timestamp,
-      radioFreq: radioConfigGetter?.call(),
+      radioFreq: radioFreq ?? radioConfigGetter?.call(),
     );
 
     // In offline mode, accumulate to offline pings list instead of queue
@@ -944,22 +1044,27 @@ class ApiQueueService {
       debugLog('[API QUEUE] Upload skipped: already uploading');
       return;
     }
-
-    await _dropDisallowedScopesItems();
-
-    final hiveEmpty = _safeRead((box) => box.isEmpty, true);
-    final memoryEmpty = _memoryQueue.isEmpty;
-
-    if (hiveEmpty && memoryEmpty) {
-      if (!silentWhenEmpty) {
-        debugLog('[API QUEUE] Upload skipped: queue empty');
-      }
-      return;
-    }
-
+    // Claim the guard BEFORE any await below (including the scope-removal
+    // pass): two overlapping flushes (the batch timer and the ping flush
+    // timer can fire close together) both read `_isUploading` in the same
+    // event-loop turn if it is set any later, both pass the check, and both
+    // select and upload the same items. Released in `finally` so every
+    // return path below (including the early ones) clears it.
     _isUploading = true;
 
     try {
+      await _dropDisallowedScopesItems();
+
+      final hiveEmpty = _safeRead((box) => box.isEmpty, true);
+      final memoryEmpty = _memoryQueue.isEmpty;
+
+      if (hiveEmpty && memoryEmpty) {
+        if (!silentWhenEmpty) {
+          debugLog('[API QUEUE] Upload skipped: queue empty');
+        }
+        return;
+      }
+
       // Collect every eligible item from both Hive and memory queue, in the
       // existing order (Hive before memory), uncapped: the SCOPES dependency
       // filter below decides what fills the batch, not this read, or a run
@@ -990,15 +1095,25 @@ class ApiQueueService {
         ..._memoryQueue,
       ];
 
+      // Excluded here independently of whether `_dropDisallowedScopesItems`
+      // above actually managed to delete anything: a Hive deletion failure
+      // (logged there) must not let a disallowed SCOPES item back into the
+      // batch, or the custom-API forward that rides the same `pings` list.
+      final scopesBlocked = scopesAllowedGetter?.call() == false;
+      final eligible = scopesBlocked
+          ? [...eligibleHive, ...eligibleMemory]
+              .where((item) => item.type != 'SCOPES')
+              .toList()
+          : [...eligibleHive, ...eligibleMemory];
+
       final items = selectBatchWithScopesDependency(
-        eligible: [...eligibleHive, ...eligibleMemory],
+        eligible: eligible,
         allQueued: allQueued,
         batchSize: _batchSize,
       );
 
       if (items.isEmpty) {
         debugLog('[API QUEUE] Upload skipped: no items ready for upload');
-        _isUploading = false;
         return;
       }
 
@@ -1113,6 +1228,7 @@ class ApiQueueService {
 
   /// Clear all queued items
   Future<void> clear() async {
+    _bumpGeneration();
     await _safeWrite((box) => box.clear());
     _memoryQueue.clear();
     _rxBuffer.clear();
@@ -1123,12 +1239,7 @@ class ApiQueueService {
   /// Called when device disconnects to ensure no stale pings remain
   /// Also stops the batch timer to prevent upload attempts without a session
   Future<void> clearOnDisconnect() async {
-    // Bump FIRST: a scope answer's write may still be in flight (the send
-    // and its enqueue are separated by a mesh round trip), and it checks
-    // this before every attempt it makes. Bumping before the clear below
-    // means such a write sees the new generation and cannot resurrect a
-    // stale item into a queue this call is about to empty.
-    _generation++;
+    _bumpGeneration();
 
     // Stop timers to prevent upload attempts without session
     _batchTimer?.cancel();
@@ -1152,6 +1263,7 @@ class ApiQueueService {
   /// Called before establishing a new connection
   /// Also restarts the batch timer if it was stopped
   Future<void> clearBeforeConnect() async {
+    _bumpGeneration();
     final count = queueSize + _rxBuffer.length;
     if (count > 0) {
       debugLog('[API QUEUE] Clearing $count stale items before connect');
@@ -1203,6 +1315,18 @@ class ApiQueueService {
         ..._safeRead((box) => box.values.toList(), <ApiQueueItem>[]),
         ..._memoryQueue,
       ];
+
+  /// Direct access to the underlying Hive box.
+  ///
+  /// Exists so a test can force the "box unavailable" path for exactly one
+  /// write (set to null, enqueue, then restore) without going through the
+  /// real recovery flow, which deletes the box from disk and would destroy
+  /// items a test already committed to it. Production code never reads or
+  /// writes this; it always goes through [_box].
+  @visibleForTesting
+  Box<ApiQueueItem>? get testBox => _box;
+  @visibleForTesting
+  set testBox(Box<ApiQueueItem>? box) => _box = box;
 
   /// Get failed items (exceeded max retries)
   List<ApiQueueItem> get failedItems {

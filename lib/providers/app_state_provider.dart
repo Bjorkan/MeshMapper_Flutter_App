@@ -8516,7 +8516,7 @@ class AppStateProvider extends ChangeNotifier with WidgetsBindingObserver {
 
     // Check if session has pings
     final sessionData = session.data;
-    var pings = (sessionData['pings'] as List<dynamic>?)
+    final pings = (sessionData['pings'] as List<dynamic>?)
         ?.map((p) => Map<String, dynamic>.from(p as Map))
         .toList();
 
@@ -8657,42 +8657,11 @@ class AppStateProvider extends ChangeNotifier with WidgetsBindingObserver {
     debugLog(
         '[OFFLINE] Authenticated with isolated session: $offlineSessionId');
 
-    // Strip SCOPES rows the upload auth cannot accept, persisting the
-    // stripped session BEFORE any chunk is built below: the partial-upload
-    // cleanup removes a PREFIX of the session's rows by uploaded count, so
-    // rows filtered out after chunking would make that count point at the
-    // wrong rows. Ruling 6: the door only closes when the key itself is
-    // absent, never on `scope_discovery: false` (key present, not
-    // enforced), since the server accepts a verified answer whatever the
-    // flag says.
-    if (!effectiveAuth.containsKey('scope_discovery')) {
-      final stripped = withoutScopesItems(pings);
-      final removedCount = pings.length - stripped.length;
-      if (removedCount > 0) {
-        pings = stripped;
-        await _offlineSessionService.replacePings(filename, pings);
-        debugLog(
-            '[OFFLINE] Stripped $removedCount SCOPES item(s): the upload auth '
-            'did not offer scope discovery');
-      }
-    }
-
-    // The server records a chunk's DISC-heard keys before it checks any
-    // SCOPES in it, but refuses a SCOPES whose DISC only arrives in a LATER
-    // chunk, so every SCOPES row is moved after every other row (a stable
-    // partition) before the pings are split into chunks below.
-    pings = orderDiscBeforeScopes(pings);
-
     // Server can take several seconds to make a freshly-created offline session
     // visible to /wardrive (read-after-write propagation). Give it a brief settle,
     // then let the FIRST batch wait it out with a generous backoff — once any batch
     // lands the session is valid for the rest.
     await Future.delayed(const Duration(seconds: 2));
-
-    // 4. Upload pings in batches of 50, retrying session/transient errors.
-    const batchSize = 50;
-    var uploadedCount = 0;
-    final totalBatches = (pings.length + batchSize - 1) ~/ batchSize;
 
     // Accumulate the server's per-region placement summary across all batches so the uploaded
     // session can show where its pings landed (e.g. "DSA 88 · EMA 157 · too far 3"). Offline
@@ -8722,58 +8691,87 @@ class AppStateProvider extends ChangeNotifier with WidgetsBindingObserver {
     const firstBatchBackoff = [2, 3, 4, 5, 6, 8, 10];
     const laterBatchBackoff = [2, 4];
 
-    for (var i = 0; i < pings.length; i += batchSize) {
-      final batchNum = (i ~/ batchSize) + 1;
-      onProgress?.call('Batch $batchNum/$totalBatches');
+    // 4. Strip SCOPES rows the upload auth cannot accept (ruling 6: the
+    //    door only closes when the key itself is absent, never on
+    //    `scope_discovery: false`, since the server accepts a verified
+    //    answer whatever the flag says), move every remaining SCOPES row
+    //    after every other row (DISC before SCOPES: the server records a
+    //    chunk's DISC-heard keys before it checks any SCOPES in it, but
+    //    refuses a SCOPES whose DISC only arrives in a LATER chunk), persist
+    //    that order BEFORE the first chunk is built, then upload in chunks
+    //    of 50, stopping at the first that does not succeed. Persisting
+    //    before chunking (not after, and not only when something was
+    //    stripped) is the point of `runOfflineChunkedUpload`: the
+    //    partial-upload cleanup below removes a PREFIX of the STORED rows
+    //    by uploaded count, so that prefix only lines up with what was
+    //    actually sent when the file already holds the same order that was
+    //    chunked.
+    final chunkedResult = await runOfflineChunkedUpload(
+      pings,
+      scopeDiscoveryOffered: effectiveAuth.containsKey('scope_discovery'),
+      batchSize: 50,
+      persistRows: (orderedRows) =>
+          _offlineSessionService.replacePings(filename, orderedRows),
+      uploadChunk: (chunk, chunkNumber, totalChunks) async {
+        onProgress?.call('Batch $chunkNumber/$totalChunks');
 
-      final batch = pings.skip(i).take(batchSize).toList();
-      final backoff = i == 0 ? firstBatchBackoff : laterBatchBackoff;
-
-      var result = await _apiService.uploadBatchWithSessionId(
-          batch, offlineSessionId,
-          onResponse: accumulatePlacement);
-
-      // Retry only session-propagation / transient errors. nonRetryable
-      // (data/zone/key) errors are NOT retried — we stop and preserve instead.
-      for (var retry = 0;
-          retry < backoff.length &&
-              (result == UploadResult.sessionError ||
-                  result == UploadResult.retryable);
-          retry++) {
-        final delay = backoff[retry];
-        final kind =
-            result == UploadResult.sessionError ? 'session' : 'transient';
-        debugLog(
-            '[OFFLINE] Batch $batchNum $kind error, retry ${retry + 1}/${backoff.length} after ${delay}s');
-        onProgress?.call('Batch $batchNum/$totalBatches (retry ${retry + 1})');
-        await Future.delayed(Duration(seconds: delay));
-        result = await _apiService.uploadBatchWithSessionId(
-            batch, offlineSessionId,
+        final backoff =
+            chunkNumber == 1 ? firstBatchBackoff : laterBatchBackoff;
+        var result = await _apiService.uploadBatchWithSessionId(
+            chunk, offlineSessionId,
             onResponse: accumulatePlacement);
-      }
 
-      if (result == UploadResult.success) {
-        uploadedCount += batch.length;
-        debugLog('[OFFLINE] Uploaded batch $batchNum: ${batch.length} pings');
-        _forwardOfflineBatchToCustomApi(
-          batch,
-          batchNum: batchNum,
-          publicKey: uploadPublicKey,
-          auth: effectiveAuth,
-        );
-        continue;
-      }
+        // Retry only session-propagation / transient errors. nonRetryable
+        // (data/zone/key) errors are NOT retried: we stop and preserve instead.
+        for (var retry = 0;
+            retry < backoff.length &&
+                (result == UploadResult.sessionError ||
+                    result == UploadResult.retryable);
+            retry++) {
+          final delay = backoff[retry];
+          final kind =
+              result == UploadResult.sessionError ? 'session' : 'transient';
+          debugLog(
+              '[OFFLINE] Batch $chunkNumber $kind error, retry ${retry + 1}/${backoff.length} after ${delay}s');
+          onProgress
+              ?.call('Batch $chunkNumber/$totalChunks (retry ${retry + 1})');
+          await Future.delayed(Duration(seconds: delay));
+          result = await _apiService.uploadBatchWithSessionId(
+              chunk, offlineSessionId,
+              onResponse: accumulatePlacement);
+        }
 
-      // Any non-success after retries: STOP and preserve the remaining pings.
-      // We never discard un-uploaded data — it stays in the file for a later retry.
-      final stopReason = result == UploadResult.sessionError
-          ? 'session error'
-          : result == UploadResult.nonRetryable
-              ? 'data/zone error'
-              : 'network error';
-      debugWarn(
-          '[OFFLINE] Batch $batchNum stopped ($stopReason) — preserving remaining pings');
-      break;
+        if (result == UploadResult.success) {
+          debugLog(
+              '[OFFLINE] Uploaded batch $chunkNumber: ${chunk.length} pings');
+          _forwardOfflineBatchToCustomApi(
+            chunk,
+            batchNum: chunkNumber,
+            publicKey: uploadPublicKey,
+            auth: effectiveAuth!,
+          );
+          return true;
+        }
+
+        // Any non-success after retries: STOP and preserve the remaining pings.
+        // We never discard un-uploaded data, it stays in the file for a later retry.
+        final stopReason = result == UploadResult.sessionError
+            ? 'session error'
+            : result == UploadResult.nonRetryable
+                ? 'data/zone error'
+                : 'network error';
+        debugWarn(
+            '[OFFLINE] Batch $chunkNumber stopped ($stopReason), preserving remaining pings');
+        return false;
+      },
+    );
+
+    final orderedPings = chunkedResult.orderedRows;
+    final uploadedCount = chunkedResult.uploadedCount;
+    if (chunkedResult.removedScopesCount > 0) {
+      debugLog(
+          '[OFFLINE] Stripped ${chunkedResult.removedScopesCount} SCOPES '
+          'item(s): the upload auth did not offer scope discovery');
     }
 
     // Delay after posting before disconnect
@@ -8790,7 +8788,7 @@ class AppStateProvider extends ChangeNotifier with WidgetsBindingObserver {
 
     // 6. Clean up session based on results — prune ONLY successfully-uploaded
     //    pings; everything not uploaded is preserved in the file for a later retry.
-    final remainingPings = pings.length - uploadedCount;
+    final remainingPings = orderedPings.length - uploadedCount;
 
     if (remainingPings <= 0) {
       await _offlineSessionService.markAsUploaded(

@@ -1,5 +1,7 @@
 import 'package:hive/hive.dart';
 
+import '../utils/public_key.dart';
+
 part 'api_queue_item.g.dart';
 
 /// Item in the API upload queue
@@ -314,6 +316,12 @@ class ApiQueueItem extends HiveObject {
   /// field since a list cannot be squeezed safely into that string. Never
   /// stamped with the auto mode, the DEFER precedent again: this is a
   /// repeater fact, not a session-mode analytics stamp.
+  ///
+  /// [publicKeyHex] is normalized to 64 upper-case hex via
+  /// [normalizePublicKey]. A malformed key (the caller should already have
+  /// refused it, `ApiQueueService.enqueueScopes` does) is stored as given
+  /// rather than dropped here, since a factory cannot fail; the server
+  /// still rejects the whole item.
   factory ApiQueueItem.fromScopes({
     required String publicKeyHex,
     required List<String> scopes,
@@ -327,7 +335,7 @@ class ApiQueueItem extends HiveObject {
       latitude: lat,
       longitude: lon,
       timestamp: DateTime.fromMillisecondsSinceEpoch(timestamp * 1000),
-      heardRepeats: publicKeyHex,
+      heardRepeats: normalizePublicKey(publicKeyHex) ?? publicKeyHex,
       canUploadAfter: DateTime.now().millisecondsSinceEpoch, // Immediate
       externalAntenna: false,
       scopes: scopes,

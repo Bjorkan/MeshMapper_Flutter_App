@@ -110,6 +110,17 @@ void main() {
       expect(item.toApiJson()['timestamp'], isA<int>());
       expect(item.toApiJson()['timestamp'], 1757400000);
     });
+
+    test('the public key is normalized to 64 upper-case hex', () {
+      final item = ApiQueueItem.fromScopes(
+        publicKeyHex: key1.toLowerCase(),
+        scopes: ['*'],
+        lat: 45.0,
+        lon: -75.0,
+        timestamp: 1757400000,
+      );
+      expect(item.toApiJson()['public_key'], key1);
+    });
   });
 
   group('enqueueScopes', () {
@@ -167,6 +178,67 @@ void main() {
       expect(queue.queueSize, 0);
     });
 
+    test('false for an invalid public key, nothing queued: the server '
+        'rejects the whole item otherwise', () async {
+      final queue = newQueue();
+      final ok = await queue.enqueueScopes(
+        publicKeyHex: 'not-a-key',
+        scopes: ['*'],
+        lat: 45.0,
+        lon: -75.0,
+        timestamp: 1757400000,
+        expectedGeneration: queue.generation,
+      );
+      expect(ok, isFalse);
+      expect(queue.queueSize, 0);
+    });
+
+    test('a lower-case key is normalized and still accepted', () async {
+      final queue = newQueue();
+      final ok = await queue.enqueueScopes(
+        publicKeyHex: key1.toLowerCase(),
+        scopes: ['*'],
+        lat: 45.0,
+        lon: -75.0,
+        timestamp: 1757400000,
+        expectedGeneration: queue.generation,
+      );
+      expect(ok, isTrue);
+      final json = await queue.extractAllAsJson();
+      expect(json.single['public_key'], key1);
+    });
+
+    test('an explicit radioFreq is used over the getter, and the getter is '
+        'the fallback when none is given', () async {
+      final queue = newQueue();
+      queue.radioConfigGetter = () => '910.525,62.5,7,5';
+
+      await queue.enqueueScopes(
+        publicKeyHex: key1,
+        scopes: ['*'],
+        lat: 45.0,
+        lon: -75.0,
+        timestamp: 1757400000,
+        expectedGeneration: queue.generation,
+        radioFreq: '906.875,250,10,5',
+      );
+      await queue.enqueueScopes(
+        publicKeyHex: key2,
+        scopes: ['*'],
+        lat: 45.0,
+        lon: -75.0,
+        timestamp: 1757400001,
+        expectedGeneration: queue.generation,
+      );
+
+      final json = await queue.extractAllAsJson();
+      expect(json[0]['radio_freq'], '906.875,250,10,5',
+          reason: 'the explicit value Task 6 passes wins');
+      expect(json[1]['radio_freq'], '910.525,62.5,7,5',
+          reason: 'no explicit value falls back to the live radio getter, '
+              'the same as every other item type');
+    });
+
     test('a disconnect racing the pending Hive write inserts nothing',
         () async {
       final dir = await Directory.systemTemp.createTemp('mm_scopes_');
@@ -199,6 +271,100 @@ void main() {
         await Hive.close();
         await dir.delete(recursive: true);
       }
+    });
+
+    test('a normal Hive write succeeds and is not a memory fallback',
+        () async {
+      final dir = await Directory.systemTemp.createTemp('mm_scopes_');
+      Hive.init(dir.path);
+      try {
+        final queue = newQueue();
+        await queue.init();
+
+        final ok = await queue.enqueueScopes(
+          publicKeyHex: key1,
+          scopes: ['*'],
+          lat: 45.0,
+          lon: -75.0,
+          timestamp: 1757400000,
+          expectedGeneration: queue.generation,
+        );
+
+        expect(ok, isTrue);
+        expect(queue.queueSize, 1);
+        // Prove it is really in Hive, not the memory fallback: reopen the
+        // box directly (the service's own box is still the open instance,
+        // so this reads it, not a different one).
+        final reopened = await Hive.openBox<ApiQueueItem>('api_queue');
+        expect(reopened.length, 1);
+        expect(reopened.getAt(0)!.type, 'SCOPES');
+      } finally {
+        await Hive.close();
+        await dir.delete(recursive: true);
+      }
+    });
+
+    test(
+        'a failed Hive write recovers (deletes and reopens the box) and '
+        'the retry lands in the fresh box', () async {
+      final dir = await Directory.systemTemp.createTemp('mm_scopes_');
+      Hive.init(dir.path);
+      try {
+        final queue = newQueue();
+        await queue.init();
+
+        // Close the box out from under the service without clearing its
+        // `_box` reference (queue.testBox stays pointed at the now-closed
+        // instance): the next write on it throws exactly like a corrupted
+        // box would in production, which is what drives `_recoverBox()`.
+        await queue.testBox!.close();
+
+        final ok = await queue.enqueueScopes(
+          publicKeyHex: key1,
+          scopes: ['*'],
+          lat: 45.0,
+          lon: -75.0,
+          timestamp: 1757400000,
+          expectedGeneration: queue.generation,
+        );
+
+        expect(ok, isTrue);
+        expect(queue.queueSize, 1);
+        // The recovered box is fresh (deleted from disk and reopened), and
+        // the retry-write landed in it, not in memory.
+        final reopened = await Hive.openBox<ApiQueueItem>('api_queue');
+        expect(reopened.length, 1);
+        expect(reopened.getAt(0)!.type, 'SCOPES');
+      } finally {
+        await Hive.close();
+        await dir.delete(recursive: true);
+      }
+    });
+
+    test(
+        'Hive unavailable (the box could not be reached at all) falls back '
+        'to memory', () async {
+      final queue = newQueue();
+      // No init(): `_box` is null from the start, the same end state a
+      // write-then-recovery failure reaches (both leave `_box` null before
+      // the write attempt below), so both take the identical fallback
+      // line. Explicitly nulling `testBox` here isolates that shared
+      // fallback from the recovery machinery covered by the test above.
+      queue.testBox = null;
+
+      final ok = await queue.enqueueScopes(
+        publicKeyHex: key1,
+        scopes: ['*'],
+        lat: 45.0,
+        lon: -75.0,
+        timestamp: 1757400000,
+        expectedGeneration: queue.generation,
+      );
+
+      expect(ok, isTrue);
+      expect(queue.queueSize, 1);
+      final json = await queue.extractAllAsJson();
+      expect(json.single['type'], 'SCOPES');
     });
 
     group('offline mode', () {
@@ -546,6 +712,138 @@ void main() {
       await t.queue.flushQueue();
 
       expect(t.posted.single.any((p) => p['type'] == 'SCOPES'), isFalse);
+    });
+
+    test(
+        'a SCOPES item that survives the drop attempt is still excluded '
+        'from the batch and never forwarded: exclusion cannot depend on '
+        'the drop having succeeded', () async {
+      final t = await build(outcomes: [UploadOutcome.success]);
+      await enqueueDisc(t.queue, pubkeyFull: key1);
+      await t.queue.enqueueScopes(
+        publicKeyHex: key1,
+        scopes: ['*'],
+        lat: 45.0,
+        lon: -75.0,
+        timestamp: 1757400001,
+        expectedGeneration: t.queue.generation,
+      );
+
+      // The drop pass (`_dropDisallowedScopesItems`, the FIRST call) sees
+      // the feature as allowed and removes nothing, standing in for a Hive
+      // deletion that was attempted and failed (logged, otherwise
+      // harmless): either way, the SCOPES item is still sitting in storage
+      // when selection runs. Every LATER call (the batch-selection filter)
+      // sees it as disallowed, so the exclusion there must not depend on
+      // the drop pass having actually removed anything.
+      var calls = 0;
+      t.queue.scopesAllowedGetter = () {
+        calls++;
+        return calls > 1 ? false : true;
+      };
+
+      await t.queue.flushQueue();
+
+      expect(calls, greaterThan(1));
+      expect(t.posted.single.map((p) => p['type']), ['DISC']);
+    });
+
+    test('overlapping flushes upload the queued items only once', () async {
+      final t = await build(outcomes: [UploadOutcome.success]);
+      await enqueueDisc(t.queue, pubkeyFull: key1);
+
+      // Neither is awaited before the other starts: both calls run
+      // synchronously up to their own first internal await, exactly the
+      // window the batch timer and the ping flush timer can both land in.
+      final first = t.queue.flushQueue();
+      final second = t.queue.flushQueue();
+      await Future.wait([first, second]);
+
+      expect(t.posted, hasLength(1),
+          reason: 'the guard must already be claimed by the time the '
+              'second flush checks it, or the same DISC item is selected, '
+              'uploaded and forwarded twice');
+      expect(t.posted.single, hasLength(1));
+    });
+
+    test(
+        'a real mix of one Hive item and one memory-fallback item uploads '
+        'DISC before SCOPES through the queue itself', () async {
+      final dir = await Directory.systemTemp.createTemp('mm_scopes_mixed_');
+      Hive.init(dir.path);
+      try {
+        final t = await build(outcomes: [UploadOutcome.success]);
+        await t.queue.init(); // now Hive-backed, same temp dir
+        t.queue.scopesAllowedGetter = () => true;
+
+        await enqueueDisc(t.queue, pubkeyFull: key1); // real Hive write
+
+        // Force exactly the next write to memory without touching the
+        // already-committed Hive item: nulling `_box` (not closing or
+        // deleting it) skips straight to the memory-fallback branch.
+        final realBox = t.queue.testBox;
+        t.queue.testBox = null;
+        await t.queue.enqueueScopes(
+          publicKeyHex: key1,
+          scopes: ['*'],
+          lat: 45.0,
+          lon: -75.0,
+          timestamp: 1757400001,
+          expectedGeneration: t.queue.generation,
+        );
+        t.queue.testBox = realBox;
+
+        // Both items are now genuinely visible: the DISC via the real
+        // (still open) Hive box, the SCOPES via the memory queue.
+        expect(t.queue.heldItems.map((i) => i.type).toSet(), {'DISC', 'SCOPES'});
+        expect(t.queue.heldItems.where((i) => i.isInBox).single.type, 'DISC');
+        expect(t.queue.heldItems.where((i) => !i.isInBox).single.type, 'SCOPES');
+
+        await t.queue.flushQueue();
+
+        expect(t.posted.single.map((p) => p['type']).toSet(), {'DISC', 'SCOPES'});
+      } finally {
+        await Hive.close();
+        await dir.delete(recursive: true);
+      }
+    });
+
+    test(
+        'a real mix of one Hive item and one memory-fallback item exports '
+        'DISC before SCOPES through the queue itself', () async {
+      final dir = await Directory.systemTemp.createTemp('mm_scopes_mixed2_');
+      Hive.init(dir.path);
+      try {
+        final queue = newQueue();
+        await queue.init();
+
+        // Enqueue the SCOPES row FIRST but keep it in Hive too (both
+        // items real Hive rows initially), forcing the second one (DISC)
+        // to memory instead, so raw storage order alone (Hive-then-memory
+        // concatenation) would put SCOPES first without the reorder.
+        await queue.enqueueScopes(
+          publicKeyHex: key1,
+          scopes: ['*'],
+          lat: 45.0,
+          lon: -75.0,
+          timestamp: 1757400001,
+          expectedGeneration: queue.generation,
+        );
+
+        final realBox = queue.testBox;
+        queue.testBox = null;
+        await enqueueDisc(queue, pubkeyFull: key1, timestamp: 1757400000);
+        queue.testBox = realBox;
+
+        expect(queue.heldItems.where((i) => i.isInBox).single.type, 'SCOPES');
+        expect(queue.heldItems.where((i) => !i.isInBox).single.type, 'DISC');
+
+        final json = await queue.extractAllAsJson();
+        expect(json.map((j) => j['type']), ['DISC', 'SCOPES']);
+      } finally {
+        await Hive.close();
+        await dir.delete(recursive: true);
+      }
     });
   });
 }
