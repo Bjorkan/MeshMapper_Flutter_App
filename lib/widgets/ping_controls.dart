@@ -94,6 +94,7 @@ typedef _ControlsDeps = ({
   bool floodTrafficEnabled,
   bool hasTargetRepeaterId,
   bool isRepeaterAdminActive,
+  bool isScopeRequestActive,
 });
 
 _ControlsDeps _controlsDepsOf(AppStateProvider s) {
@@ -121,6 +122,7 @@ _ControlsDeps _controlsDepsOf(AppStateProvider s) {
     floodTrafficEnabled: s.floodTrafficEnabled,
     hasTargetRepeaterId: targetId != null && targetId.isNotEmpty,
     isRepeaterAdminActive: s.isRepeaterAdminActive,
+    isScopeRequestActive: s.isScopeRequestActive,
   );
 }
 
@@ -332,6 +334,7 @@ class PingControls extends StatelessWidget {
                           : txNotAllowed
                               ? Colors.red
                               : Colors.orange,
+                      showScopesBadge: isHybridModeRunning && appState.isScopeRequestActive,
                     ),
                   ),
                   const SizedBox(width: 10),
@@ -369,6 +372,7 @@ class PingControls extends StatelessWidget {
                                 autoPingWaiting)), // Active during listening/waiting phases
                     subtitle: passiveStopping ? 'Stopping' : null,
                     subtitleColor: Colors.orange,
+                    showScopesBadge: isPassiveModeRunning && appState.isScopeRequestActive,
                     onPressed: () => _toggleRxAuto(context, appState),
                   ),
                 ),
@@ -451,6 +455,7 @@ class _ActionButton extends StatefulWidget {
   final VoidCallback onPressed;
   final String? subtitle; // Optional subtitle text (e.g., "Move 5m")
   final Color? subtitleColor; // Optional subtitle color
+  final bool showScopesBadge; // Show "Scopes" badge while requesting
 
   const _ActionButton({
     required this.icon,
@@ -462,6 +467,7 @@ class _ActionButton extends StatefulWidget {
     this.showCooldown = false,
     this.subtitle,
     this.subtitleColor,
+    this.showScopesBadge = false,
   });
 
   @override
@@ -534,6 +540,30 @@ class _ActionButtonState extends State<_ActionButton> {
                             border: Border.all(
                               color: colorScheme.surface,
                               width: 2,
+                            ),
+                          ),
+                        ),
+                      ),
+                    // Scopes badge while asking for scopes
+                    if (widget.showScopesBadge)
+                      Positioned(
+                        top: -4,
+                        right: -8,
+                        child: Container(
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 6,
+                            vertical: 2,
+                          ),
+                          decoration: BoxDecoration(
+                            color: const Color(0xFF51D4E9),
+                            borderRadius: BorderRadius.circular(8),
+                          ),
+                          child: const Text(
+                            'Scopes',
+                            style: TextStyle(
+                              fontSize: 8,
+                              fontWeight: FontWeight.w600,
+                              color: Colors.black87,
                             ),
                           ),
                         ),
@@ -1218,6 +1248,7 @@ class _CompactPingControlsState extends State<CompactPingControls> {
                           _lastActiveButton == _LastActiveButton.activeMode
                       ? appState.cooldownTimer.progress
                       : null,
+          showScopesBadge: isHybridModeRunning && appState.isScopeRequestActive,
           onPressed: () => hybridEnabled
               ? _toggleHybridAuto(context, appState)
               : _toggleTxRxAuto(context, appState),
@@ -1252,6 +1283,7 @@ class _CompactPingControlsState extends State<CompactPingControls> {
                               _lastActiveButton == _LastActiveButton.passiveMode
                           ? appState.cooldownTimer.progress
                           : null,
+          showScopesBadge: isPassiveModeRunning && appState.isScopeRequestActive,
           onPressed: () => _toggleRxAuto(context, appState),
         );
 
@@ -1503,6 +1535,7 @@ class LandscapePingControls extends StatelessWidget {
                       isActive: txStopping || isTxModeRunning,
                       stopping: txStopping,
                       countdown: landscapeActiveModeCountdown(status, rf),
+                      showScopesBadge: isHybridModeRunning && appState.isScopeRequestActive,
                       onPressed: () => hybridEnabled
                           ? _toggleHybridAuto(context, appState)
                           : _toggleTxRxAuto(context, appState),
@@ -1538,6 +1571,7 @@ class LandscapePingControls extends StatelessWidget {
                             (discoveryWindowActive || autoPingWaiting)),
                     stopping: passiveStopping,
                     countdown: landscapePassiveModeCountdown(status, rf),
+                    showScopesBadge: isPassiveModeRunning && appState.isScopeRequestActive,
                     onPressed: () => _toggleRxAuto(context, appState),
                   ),
                 ),
@@ -1741,6 +1775,7 @@ class _LandscapeIconButton extends StatefulWidget {
   // so the caller says so directly.
   final bool stopping;
   final VoidCallback onPressed;
+  final bool showScopesBadge; // Show "Scopes" badge while requesting
 
   const _LandscapeIconButton({
     required this.icon,
@@ -1751,6 +1786,7 @@ class _LandscapeIconButton extends StatefulWidget {
     this.isActive = false,
     this.countdown,
     this.stopping = false,
+    this.showScopesBadge = false,
   });
 
   @override
@@ -1867,6 +1903,7 @@ class _CompactActionButton extends StatefulWidget {
   final VoidCallback onPressed;
   final double?
       progress; // 0.0 to 1.0 for progress bar fill, null = no progress bar
+  final bool showScopesBadge; // Show "Scopes" badge while requesting
 
   const _CompactActionButton({
     required this.icon,
@@ -1877,6 +1914,7 @@ class _CompactActionButton extends StatefulWidget {
     this.isActive = false,
     this.isExpanded = false,
     this.progress,
+    this.showScopesBadge = false,
   });
 
   @override
@@ -1982,6 +2020,30 @@ class _CompactActionButtonState extends State<_CompactActionButton> {
                   ),
                 ),
               ),
+              // Scopes badge while asking for scopes
+              if (widget.showScopesBadge)
+                Positioned(
+                  top: -6,
+                  right: -6,
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 6,
+                      vertical: 2,
+                    ),
+                    decoration: BoxDecoration(
+                      color: const Color(0xFF51D4E9),
+                      borderRadius: BorderRadius.circular(8),
+                    ),
+                    child: const Text(
+                      'Scopes',
+                      style: TextStyle(
+                        fontSize: 8,
+                        fontWeight: FontWeight.w600,
+                        color: Colors.black87,
+                      ),
+                    ),
+                  ),
+                ),
             ],
           ),
         ),
