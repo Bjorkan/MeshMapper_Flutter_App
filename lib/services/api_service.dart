@@ -354,22 +354,29 @@ class ApiService {
   ///
   /// The per-attempt timeout lives at the call site, so the replay gets its
   /// own full allowance rather than the remains of the first one's.
+  ///
+  /// [prepareReplay], when given, is asked for the replay at the moment it is
+  /// about to go out, so a caller whose body depends on state that may have
+  /// changed while the first attempt was failing can rebuild it. Returning
+  /// null skips the replay and rethrows the first attempt's error.
   Future<http.Response> _send(
     String label,
     Future<http.Response> Function() request, {
     DateTime? deadline,
+    Future<http.Response> Function()? Function()? prepareReplay,
   }) async {
-    Future<http.Response> sendAttempt() {
-      if (deadline == null) return request();
+    Future<http.Response> sendAttempt(Future<http.Response> Function() send) {
+      if (deadline == null) return send();
       final remaining = deadline.difference(_now());
       if (remaining <= Duration.zero) {
         throw TimeoutException('$label deadline expired');
       }
-      return request().timeout(remaining);
+      return send().timeout(remaining);
     }
 
-    Future<http.Response> completeWithinDeadline() async {
-      final response = await sendAttempt();
+    Future<http.Response> completeWithinDeadline(
+        Future<http.Response> Function() send) async {
+      final response = await sendAttempt(send);
       if (deadline != null && !_now().isBefore(deadline)) {
         throw TimeoutException('$label deadline expired');
       }
@@ -377,15 +384,21 @@ class ApiService {
     }
 
     try {
-      return await completeWithinDeadline();
+      return await completeWithinDeadline(request);
     } catch (e) {
       if (!_connectionWasAlreadyClosed(e)) rethrow;
       if (deadline != null && !_now().isBefore(deadline)) {
         throw TimeoutException('$label deadline expired');
       }
+      final replay = prepareReplay == null ? request : prepareReplay();
+      if (replay == null) {
+        debugWarn('[API] $label found the connection already closed by the '
+            'server, nothing left to send again');
+        rethrow;
+      }
       debugWarn('[API] $label found the connection already closed by the '
           'server, sending it again');
-      return completeWithinDeadline();
+      return completeWithinDeadline(replay);
     }
   }
 
@@ -1093,15 +1106,32 @@ class ApiService {
         if (autoMode != null) 'auto_mode': autoMode,
       };
 
+      Future<http.Response> post(Map<String, dynamic> body) => _client
+          .post(
+            Uri.parse(wardriveEndpoint),
+            headers: {'Content-Type': 'application/json'},
+            body: json.encode(body),
+          )
+          .timeout(const Duration(seconds: 30));
+
       final response = await _send(
         'POST /wardrive-api.php/wardrive',
-        () => _client
-            .post(
-              Uri.parse(wardriveEndpoint),
-              headers: {'Content-Type': 'application/json'},
-              body: json.encode(payload),
-            )
-            .timeout(const Duration(seconds: 30)),
+        () => post(payload),
+        // The queue only let SCOPES into this batch because scope discovery
+        // was offered when it built it. A live auth can withdraw that while
+        // the first attempt is failing on a dead socket, so the replay reads
+        // the gate again and leaves the answers out once it has closed.
+        prepareReplay: () {
+          if (_scopeDiscoveryOffered) return () => post(payload);
+          final kept =
+              entries.where((e) => e['type'] != 'SCOPES').toList();
+          if (kept.length == entries.length) return () => post(payload);
+          debugWarn('[API] Replay drops ${entries.length - kept.length} '
+              'SCOPES item(s): scope discovery withdrawn since the batch '
+              'was built');
+          if (kept.isEmpty) return null;
+          return () => post({...payload, 'data': kept});
+        },
       );
 
       stopwatch.stop();
