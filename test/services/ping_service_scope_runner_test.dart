@@ -114,7 +114,8 @@ class _FakeConnection implements MeshCoreConnection {
   Stream<Uint8List> get traceDataStream => const Stream.empty();
 
   @override
-  Future<void> sendPing(String message) async {
+  Future<void> sendPing(String message, {void Function()? onWire}) async {
+    onWire?.call();
     events.add('tx@$_ms');
   }
 

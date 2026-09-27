@@ -2624,8 +2624,12 @@ class MeshCoreConnection {
 
   /// Send channel text message (for TX pings)
   /// Reference: sendCommandSendChannelTxtMsg in connection.js
+  ///
+  /// [onWire] runs once the frame is past every write gate (sign, scope
+  /// lease), immediately before the transport write.
   Future<void> sendChannelTextMessage(
-      int txtType, int channelIdx, int senderTimestamp, String text) async {
+      int txtType, int channelIdx, int senderTimestamp, String text,
+      {void Function()? onWire}) async {
     final data = BufferWriter();
     data.writeByte(CommandCodes.sendChannelTxtMsg);
     data.writeByte(txtType);
@@ -2636,7 +2640,8 @@ class MeshCoreConnection {
     // The firmware answers with OK, or ERR on a bad channel index, never with
     // RESP_CODE_SENT. Wait for that reply (normally a few milliseconds); the
     // claim gives up after [ownReplyTimeout], as the message may still be sent.
-    final claim = await _sendClaimingReply(data, _OwnReplyKind.tx);
+    final claim =
+        await _sendClaimingReply(data, _OwnReplyKind.tx, onWire: onWire);
     await claim.reply.future;
   }
 
@@ -2646,7 +2651,11 @@ class MeshCoreConnection {
   /// so the exact same string is used for both TxTracker echo matching and the
   /// actual transmission.
   /// Power is not included in the mesh message — it is sent per-ping in the API payload.
-  Future<void> sendPing(String message) async {
+  ///
+  /// [onWire] runs when the frame actually goes out, after any wait behind a
+  /// sign or a scope lease and before the transport write, so echo tracking
+  /// armed there is live for the transmission and timed from it.
+  Future<void> sendPing(String message, {void Function()? onWire}) async {
     final channel = _wardrivingChannel;
     if (channel == null) {
       throw Exception('Wardriving channel not initialized');
@@ -2655,7 +2664,8 @@ class MeshCoreConnection {
     debugLog('[CONN] Sending ping: $message');
     final timestamp = DateTime.now().millisecondsSinceEpoch ~/ 1000;
     await sendChannelTextMessage(
-        TxtTypes.plain, channel.channelIndex, timestamp, message);
+        TxtTypes.plain, channel.channelIndex, timestamp, message,
+        onWire: onWire);
   }
 
   /// Send discovery request to find nearby repeaters/rooms

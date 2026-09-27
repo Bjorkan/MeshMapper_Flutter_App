@@ -1006,123 +1006,136 @@ class PingService {
       // Capture noise floor at ping time
       final noiseFloor = _connection.lastNoiseFloor;
 
-      // Create TX ping record FIRST so it's available for echo callbacks
-      final txPing = TxPing(
-        latitude: position.latitude,
-        longitude: position.longitude,
-        power: txPowerDbm,
-        timestamp: DateTime.now(),
-        deviceId: _deviceId,
-        heardRepeaters: [], // Will be populated dynamically as echoes arrive
-      );
+      // Everything below runs in [goingOut], which the connection calls once
+      // the frame is past every write gate (a sign, a scope lease) and just
+      // before the transport write. A TX parked behind a lease for up to 4 s
+      // therefore neither spends its echo window waiting nor records a send
+      // time from before it went out, and tracking is still armed before the
+      // radio can hear an echo.
+      void goingOut() {
+        // A force teardown while the frame waited at a gate: the send still
+        // goes out, but it belongs to no session any more, and the shared
+        // tracker may already be following a newer session's ping.
+        if (epoch != _sendEpoch) return;
 
-      // Store reference for updating with heard repeaters
-      _lastTxPing = txPing;
-      debugLog('[PING] Created TxPing, ready for echo tracking');
-
-      // Notify immediately so TxLogEntry exists BEFORE echoes arrive
-      // This fixes timing issue where echoes arrived before onTxPing was called
-      onTxPing?.call(txPing);
-
-      // Start TX echo tracking BEFORE sending ping (matches web client flow)
-      // Reference: startTxTracking() called before sendChannelTextMessage() in wardrive.js
-      final channelIndex = _connection.wardrivingChannelIndex;
-      final channelHash = _connection.wardrivingChannelHash;
-      final channelKey = _connection.wardrivingChannelKey;
-
-      if (_txTracker != null &&
-          channelIndex != null &&
-          channelHash != null &&
-          channelKey != null) {
-        debugLog('[PING] Starting TX echo tracking for: "$pingMessage"');
-
-        // Wire up real-time echo callback before starting tracking
-        final txTracker = _txTracker;
-        txTracker.onEchoReceived = (repeaterId, snr, rssi, isNew) {
-          debugLog(
-              '[PING] onEchoReceived callback fired: $repeaterId, SNR=$snr, RSSI=$rssi, isNew=$isNew');
-          final txPing = _lastTxPing;
-          if (txPing != null) {
-            final repeater = HeardRepeater(
-              repeaterId: repeaterId,
-              snr: snr,
-              rssi: rssi,
-              seenCount: txTracker.repeaters[repeaterId]?.seenCount ?? 1,
-            );
-
-            if (isNew) {
-              // Add new repeater to the list
-              txPing.heardRepeaters.add(repeater);
-              debugLog(
-                  '[PING] Real-time: Added new repeater $repeaterId (SNR: $snr) - total: ${txPing.heardRepeaters.length}');
-            } else {
-              // Update existing repeater's SNR if better
-              final idx = txPing.heardRepeaters
-                  .indexWhere((r) => r.repeaterId == repeaterId);
-              if (idx >= 0) {
-                txPing.heardRepeaters[idx] = repeater;
-                debugLog(
-                    '[PING] Real-time: Updated repeater $repeaterId (SNR: $snr)');
-              }
-            }
-
-            // Notify for real-time UI updates
-            debugLog(
-                '[PING] Calling onEchoReceived callback (callback=${onEchoReceived != null ? "SET" : "NULL"})');
-            onEchoReceived?.call(txPing, repeater, isNew);
-            debugLog('[PING] onEchoReceived callback completed');
-          } else {
-            debugWarn('[PING] onEchoReceived: _lastTxPing is null!');
-          }
-        };
-
-        txTracker.onMultiHopEchoReceived =
-            (repeaterId, snr, rssi, pathHops, isNew) {
-          debugLog(
-              '[PING] Multi-hop echo: $repeaterId, SNR=$snr, hops=${pathHops.length}, isNew=$isNew');
-          final txPing = _lastTxPing;
-          if (txPing != null) {
-            final repeater = HeardRepeater(
-              repeaterId: repeaterId,
-              snr: snr,
-              rssi: rssi,
-              seenCount:
-                  txTracker.multiHopRepeaters[repeaterId]?.seenCount ?? 1,
-              pathHops: pathHops,
-            );
-
-            if (isNew) {
-              txPing.heardRepeaters.add(repeater);
-            } else {
-              final idx = txPing.heardRepeaters.indexWhere(
-                  (r) => r.repeaterId == repeaterId && r.pathHops != null);
-              if (idx >= 0) {
-                txPing.heardRepeaters[idx] = repeater;
-              }
-            }
-
-            onMultiHopEchoReceived?.call(
-                txPing, repeaterId, snr, rssi, pathHops, isNew);
-          }
-        };
-
-        txTracker.startTracking(
-          payload: pingMessage,
-          channelIdx: channelIndex,
-          channelHash: channelHash,
-          channelKey: channelKey,
-          windowDuration: _rxListeningWindow,
+        // Create TX ping record FIRST so it's available for echo callbacks
+        final txPing = TxPing(
+          latitude: position.latitude,
+          longitude: position.longitude,
+          power: txPowerDbm,
+          timestamp: clock.now(),
+          deviceId: _deviceId,
+          heardRepeaters: [], // Will be populated dynamically as echoes arrive
         );
-      } else {
-        debugWarn(
-            '[PING] TX tracking not available - channel info missing or no tracker');
+
+        // Store reference for updating with heard repeaters
+        _lastTxPing = txPing;
+        debugLog('[PING] Created TxPing, ready for echo tracking');
+
+        // Notify immediately so TxLogEntry exists BEFORE echoes arrive
+        // This fixes timing issue where echoes arrived before onTxPing was called
+        onTxPing?.call(txPing);
+
+        // Start TX echo tracking BEFORE sending ping (matches web client flow)
+        // Reference: startTxTracking() called before sendChannelTextMessage() in wardrive.js
+        final channelIndex = _connection.wardrivingChannelIndex;
+        final channelHash = _connection.wardrivingChannelHash;
+        final channelKey = _connection.wardrivingChannelKey;
+
+        if (_txTracker != null &&
+            channelIndex != null &&
+            channelHash != null &&
+            channelKey != null) {
+          debugLog('[PING] Starting TX echo tracking for: "$pingMessage"');
+
+          // Wire up real-time echo callback before starting tracking
+          final txTracker = _txTracker;
+          txTracker.onEchoReceived = (repeaterId, snr, rssi, isNew) {
+            debugLog(
+                '[PING] onEchoReceived callback fired: $repeaterId, SNR=$snr, RSSI=$rssi, isNew=$isNew');
+            final txPing = _lastTxPing;
+            if (txPing != null) {
+              final repeater = HeardRepeater(
+                repeaterId: repeaterId,
+                snr: snr,
+                rssi: rssi,
+                seenCount: txTracker.repeaters[repeaterId]?.seenCount ?? 1,
+              );
+
+              if (isNew) {
+                // Add new repeater to the list
+                txPing.heardRepeaters.add(repeater);
+                debugLog(
+                    '[PING] Real-time: Added new repeater $repeaterId (SNR: $snr) - total: ${txPing.heardRepeaters.length}');
+              } else {
+                // Update existing repeater's SNR if better
+                final idx = txPing.heardRepeaters
+                    .indexWhere((r) => r.repeaterId == repeaterId);
+                if (idx >= 0) {
+                  txPing.heardRepeaters[idx] = repeater;
+                  debugLog(
+                      '[PING] Real-time: Updated repeater $repeaterId (SNR: $snr)');
+                }
+              }
+
+              // Notify for real-time UI updates
+              debugLog(
+                  '[PING] Calling onEchoReceived callback (callback=${onEchoReceived != null ? "SET" : "NULL"})');
+              onEchoReceived?.call(txPing, repeater, isNew);
+              debugLog('[PING] onEchoReceived callback completed');
+            } else {
+              debugWarn('[PING] onEchoReceived: _lastTxPing is null!');
+            }
+          };
+
+          txTracker.onMultiHopEchoReceived =
+              (repeaterId, snr, rssi, pathHops, isNew) {
+            debugLog(
+                '[PING] Multi-hop echo: $repeaterId, SNR=$snr, hops=${pathHops.length}, isNew=$isNew');
+            final txPing = _lastTxPing;
+            if (txPing != null) {
+              final repeater = HeardRepeater(
+                repeaterId: repeaterId,
+                snr: snr,
+                rssi: rssi,
+                seenCount:
+                    txTracker.multiHopRepeaters[repeaterId]?.seenCount ?? 1,
+                pathHops: pathHops,
+              );
+
+              if (isNew) {
+                txPing.heardRepeaters.add(repeater);
+              } else {
+                final idx = txPing.heardRepeaters.indexWhere(
+                    (r) => r.repeaterId == repeaterId && r.pathHops != null);
+                if (idx >= 0) {
+                  txPing.heardRepeaters[idx] = repeater;
+                }
+              }
+
+              onMultiHopEchoReceived?.call(
+                  txPing, repeaterId, snr, rssi, pathHops, isNew);
+            }
+          };
+
+          txTracker.startTracking(
+            payload: pingMessage,
+            channelIdx: channelIndex,
+            channelHash: channelHash,
+            channelKey: channelKey,
+            windowDuration: _rxListeningWindow,
+          );
+        } else {
+          debugWarn(
+              '[PING] TX tracking not available - channel info missing or no tracker');
+        }
+
+        // Play transmit sound immediately before sending
+        _audioService?.playTransmitSound();
       }
 
-      // Play transmit sound immediately before sending
-      _audioService?.playTransmitSound();
-
-      // Send ping via BLE (pre-composed body — wire tag or legacy coords)
-      await _connection.sendPing(pingMessage);
+      // Send ping via BLE (pre-composed body, wire tag or legacy coords)
+      await _connection.sendPing(pingMessage, onWire: goingOut);
 
       // A force teardown can land while BLE is awaiting its sent confirmation.
       // The radio may have accepted the packet, but this stale send must not
