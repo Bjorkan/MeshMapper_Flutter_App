@@ -48,3 +48,24 @@ LinkFlowDecision decideLinkFlow({
   if (promptedThisAppSession) return LinkFlowDecision.skip;
   return LinkFlowDecision.prompt;
 }
+
+/// What the link flow does with a failed radio sign.
+enum SignFailureAction {
+  /// Count a strike towards "this firmware cannot sign" (two persist it).
+  strike,
+
+  /// A transient failure: back off with the usual retry ladder, no strike.
+  backoff,
+
+  /// Give up quietly for this attempt.
+  silent,
+}
+
+/// Maps a `SignException` code to what the link flow does with it. `busy`
+/// means scope discovery held the radio for the whole wait, which says
+/// nothing about the firmware, so it never counts as an `unsupported` strike.
+SignFailureAction signFailureAction(String code) => switch (code) {
+      'unsupported' => SignFailureAction.strike,
+      'busy' => SignFailureAction.backoff,
+      _ => SignFailureAction.silent,
+    };

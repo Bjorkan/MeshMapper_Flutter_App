@@ -81,7 +81,15 @@ class CommandCodes {
   /// firmware code 13+. Answered by PUSH_CODE_BINARY_RESPONSE (0x8C).
   static const int sendAnonReq = 57;
   static const int sendBinaryReq = 50;
+
+  /// CMD_FACTORY_RESET: [51]["reset"]. Never sent by the app; listed so the
+  /// reply ledger knows it answers nothing (the radio drops the link first).
+  static const int factoryReset = 51;
   static const int setPathHashMode = 61; // 0x3D - CMD_SET_PATH_HASH_MODE
+
+  /// CMD_RUN_CLI_COMMAND: [66][text], answered by one CLI reply, except
+  /// `reboot`, which answers nothing. Never sent by the app.
+  static const int runCliCommand = 66;
 }
 
 /// Anonymous request types for CMD_SEND_ANON_REQ

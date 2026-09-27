@@ -11571,7 +11571,15 @@ class AppStateProvider extends ChangeNotifier with WidgetsBindingObserver {
       // The radio signs the RAW 32 bytes, never their hex text.
       signature = await connection.sign(nonceBytes);
     } on SignException catch (e) {
-      if (e.code == 'unsupported') {
+      final action = signFailureAction(e.code);
+      if (action == SignFailureAction.backoff) {
+        // Scope discovery held the radio for the whole wait. That says
+        // nothing about the firmware, so no strike: retry on the ladder.
+        debugLog('[ACCOUNT] Radio busy with scope discovery for '
+            '${_pkPrefix(pubkey)}, backing off');
+        return _recordLinkFailure(pubkey, 'sign_busy');
+      }
+      if (action == SignFailureAction.strike) {
         // Two strikes before this is written down. A stats/battery ERR that
         // was already in flight when the sign started is misattributed as
         // 'unsupported' (see the ERR branch in connection.dart) — one stray
