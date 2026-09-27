@@ -624,7 +624,7 @@ void main() {
       });
     });
 
-    test('a timeout logs no response, stamps nothing, due again next sweep',
+    test('a timeout logs no response, stamps nothing, and holds the repeater',
         () {
       _run((async, h) {
         _start(async, h.build(), [_cand(0x11)]);
@@ -632,10 +632,126 @@ void main() {
         expect(h.logged.single.outcome, ScopeLogOutcome.noResponse);
         expect(h.enqueued, isEmpty);
         expect(h.cache[_key(0x11)], isNull);
+        // A no-answer never stamps an answer, but it does start a hold: the
+        // very next sweep must not re-ask it.
+        expect(h.cache.heldUntil(_key(0x11)), isNotNull);
         final second = ScopeCancelToken();
         _start(async, h.build(token: second), [_cand(0x11)]);
         async.elapse(const Duration(seconds: 10));
+        expect(h.radio.asks, hasLength(1),
+            reason: 'held: the second sweep must not re-ask it');
+      });
+    });
+
+    test('a first miss holds for 15 minutes: not re-asked one second short, '
+        'asked again exactly at the deadline', () {
+      _run((async, h) {
+        _start(async, h.build(), [_cand(0x11)]);
+        async.elapse(const Duration(seconds: 10));
+        final heldUntil = h.cache.heldUntil(_key(0x11));
+        expect(heldUntil, isNotNull);
+
+        // One second short of the deadline: still held. A held sweep
+        // resolves on microtasks alone (nothing to ask), so this must not
+        // itself advance the clock any further than the boundary being
+        // tested.
+        async.elapse(Duration(seconds: heldUntil! - h.nowSec() - 1));
+        _start(async, h.build(token: ScopeCancelToken()), [_cand(0x11)]);
+        expect(h.radio.asks, hasLength(1),
+            reason: 'one second short of the 15 minute deadline');
+
+        // The deadline itself: due again.
+        async.elapse(const Duration(seconds: 1));
+        expect(h.nowSec(), heldUntil);
+        _start(async, h.build(token: ScopeCancelToken()), [_cand(0x11)]);
+        async.elapse(const Duration(seconds: 5));
+        expect(h.radio.asks, hasLength(2),
+            reason: 'exactly at the 15 minute deadline: due again');
+      });
+    });
+
+    test('a second consecutive miss doubles the hold to 30 minutes', () {
+      _run((async, h) {
+        _start(async, h.build(), [_cand(0x11)]);
+        async.elapse(const Duration(seconds: 10));
+        final firstHeldUntil = h.cache.heldUntil(_key(0x11))!;
+
+        // Wait out the first hold exactly, then miss again.
+        async.elapse(Duration(seconds: firstHeldUntil - h.nowSec()));
+        _start(async, h.build(token: ScopeCancelToken()), [_cand(0x11)]);
+        async.elapse(const Duration(seconds: 10));
+        final secondHeldUntil = h.cache.heldUntil(_key(0x11))!;
         expect(h.radio.asks, hasLength(2));
+        // Both asks take the same fixed lease + answer-wait time to miss, so
+        // the gap between the two deadlines is ~30 minutes if the second
+        // hold doubled, ~15 minutes if it did not.
+        final gap = secondHeldUntil - firstHeldUntil;
+        expect(gap, greaterThan(25 * 60),
+            reason: 'the second hold must be the doubled 30 minutes, not '
+                'another 15');
+        expect(gap, lessThan(35 * 60));
+      });
+    });
+
+    test('an answer clears the hold: the same repeater is due again at once '
+        'once it finally answers', () {
+      _run((async, h) {
+        _start(async, h.build(), [_cand(0x11)]);
+        async.elapse(const Duration(seconds: 10));
+        expect(h.cache.heldUntil(_key(0x11)), isNotNull);
+
+        // Wait out the hold, then let the second ask answer.
+        final heldUntil = h.cache.heldUntil(_key(0x11))!;
+        async.elapse(Duration(seconds: heldUntil - h.nowSec()));
+        h.radio.scripts[_key(0x11)] = _Script.answers('Ottawa');
+        _start(async, h.build(token: ScopeCancelToken()), [_cand(0x11)]);
+        async.elapse(const Duration(seconds: 10));
+        expect(h.cache[_key(0x11)], isNotNull);
+        expect(h.cache.heldUntil(_key(0x11)), isNull,
+            reason: 'an answer clears the hold');
+      });
+    });
+
+    test('flooded, radio error, malformed and aborted outcomes never hold '
+        'the repeater', () {
+      _run((async, h) {
+        h.radio.scripts[_key(0x11)] = const _Script(inLease: ScopeFlooded());
+        _start(async, h.build(), [_cand(0x11)]);
+        async.elapse(const Duration(seconds: 5));
+        expect(h.cache.heldUntil(_key(0x11)), isNull);
+        _start(async, h.build(token: ScopeCancelToken()), [_cand(0x11)]);
+        async.elapse(const Duration(seconds: 5));
+        expect(h.radio.asks.where((a) => a.key == _key(0x11)).length, 2,
+            reason: 'flooded never holds: asked again at once');
+
+        h.radio.scripts[_key(0x22)] =
+            const _Script(inLease: ScopeRadioError(3));
+        _start(async, h.build(token: ScopeCancelToken()), [_cand(0x22)]);
+        async.elapse(const Duration(seconds: 5));
+        expect(h.cache.heldUntil(_key(0x22)), isNull);
+        _start(async, h.build(token: ScopeCancelToken()), [_cand(0x22)]);
+        async.elapse(const Duration(seconds: 5));
+        expect(h.radio.asks.where((a) => a.key == _key(0x22)).length, 2,
+            reason: 'a radio error never holds: asked again at once');
+
+        h.radio.scripts[_key(0x33)] = const _Script(
+            answerAfter: Duration(milliseconds: 300), body: [1, 2]);
+        _start(async, h.build(token: ScopeCancelToken()), [_cand(0x33)]);
+        async.elapse(const Duration(seconds: 5));
+        expect(h.cache.heldUntil(_key(0x33)), isNull);
+        _start(async, h.build(token: ScopeCancelToken()), [_cand(0x33)]);
+        async.elapse(const Duration(seconds: 5));
+        expect(h.radio.asks.where((a) => a.key == _key(0x33)).length, 2,
+            reason: 'a malformed answer never holds: asked again at once');
+
+        h.radio.scripts[_key(0x44)] = const _Script(inLease: ScopeAborted());
+        _start(async, h.build(token: ScopeCancelToken()), [_cand(0x44)]);
+        async.elapse(const Duration(seconds: 5));
+        expect(h.cache.heldUntil(_key(0x44)), isNull);
+        _start(async, h.build(token: ScopeCancelToken()), [_cand(0x44)]);
+        async.elapse(const Duration(seconds: 5));
+        expect(h.radio.asks.where((a) => a.key == _key(0x44)).length, 2,
+            reason: 'an aborted ask never holds: asked again at once');
       });
     });
 

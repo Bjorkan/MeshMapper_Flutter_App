@@ -17,6 +17,12 @@ import '../../utils/public_key.dart';
 /// this same repeater is still being written (Task 6's detached
 /// persistence), the repeater is never due, whatever the two rules would
 /// otherwise say.
+///
+/// [heldUntil] is read next: a repeater this phone asked and got no answer
+/// from is held (not due) until that Unix-second deadline, whatever the two
+/// rules would otherwise say. Null means no hold. At (not past) the
+/// deadline it is due again, so the caller's own [nowSec] decides the
+/// boundary, not this function.
 bool isScopeQueryDue({
   required bool onServerList,
   required int? serverCheckedAt,
@@ -24,8 +30,10 @@ bool isScopeQueryDue({
   required bool persistPending,
   required int nowSec,
   required int refreshDays,
+  int? heldUntil,
 }) {
   if (persistPending) return false;
+  if (heldUntil != null && nowSec < heldUntil) return false;
   final refreshSec = refreshDays * 86400;
   final rule1 = !onServerList ||
       serverCheckedAt == null ||
@@ -37,8 +45,11 @@ bool isScopeQueryDue({
 
 /// This phone's own cached answer for one repeater.
 ///
-/// There are no attempt stamps: a request that got no answer records
-/// nothing here, so that repeater reads as due again immediately (ruling 4).
+/// There are no attempt stamps here: a request that got no answer records
+/// nothing in [ScopeQueryCache]'s answer map. Instead it starts or extends a
+/// separate, memory-only hold (see [ScopeQueryCache.recordNoAnswer]), so
+/// this repeater is not re-asked and re-silenced within the same firmware
+/// window.
 class ScopeCacheEntry {
   /// When this phone last got an answer from the repeater (Unix seconds).
   final int? answeredAt;
@@ -67,12 +78,26 @@ class ScopeQueryCache {
   /// runner's job, not this cache's.
   static const int maxPendingPersist = 32;
 
+  /// The hold's starting length, for a repeater's first consecutive miss.
+  static const Duration noAnswerHoldBase = Duration(minutes: 15);
+
+  /// The longest a hold ever runs, however many consecutive misses in a
+  /// row: the repeater firmware's shared anonymous-request budget resets
+  /// well inside this, and a longer hold would only cost real coverage for
+  /// no benefit to the budget.
+  static const Duration noAnswerHoldMax = Duration(hours: 2);
+
   final Map<String, ScopeCacheEntry> _entries;
 
   /// Repeater keys whose answer is still being written to disk (Task 6's
   /// detached persistence). Memory only: never read by [toJson] or
   /// populated by [fromJson].
   final Set<String> pendingPersist = <String>{};
+
+  /// Consecutive no-answer holds, keyed the same way as [_entries]. Memory
+  /// only, exactly like [pendingPersist]: never read by [toJson] or
+  /// populated by [fromJson], so a hold never survives a relaunch.
+  final Map<String, _ScopeHold> _holds = <String, _ScopeHold>{};
 
   ScopeQueryCache._(this._entries);
 
@@ -115,11 +140,67 @@ class ScopeQueryCache {
   }
 
   /// Records that the repeater answered at [nowSec]. A no-op when [keyHex]
-  /// does not normalize to a full public key.
+  /// does not normalize to a full public key. Also clears any no-answer
+  /// hold and miss count [keyHex] was carrying: an answer means the
+  /// repeater is reachable again, so the next silence starts a fresh count.
   void recordAnswer(String keyHex, int nowSec) {
     final key = normalizePublicKey(keyHex);
     if (key == null) return;
     _entries[key] = ScopeCacheEntry(answeredAt: nowSec);
+    _holds.remove(key);
+  }
+
+  /// The Unix-second deadline before which [keyHex] must not be asked
+  /// again, or null when it has no hold (never missed, or its last hold was
+  /// cleared by an answer). Also null when [keyHex] does not normalize.
+  int? heldUntil(String keyHex) {
+    final key = normalizePublicKey(keyHex);
+    if (key == null) return null;
+    return _holds[key]?.heldUntil;
+  }
+
+  /// Records that an ask to [keyHex] at [nowSec] got no answer: starts or
+  /// extends its hold so this phone does not re-ask (and re-silence) it
+  /// before the repeater firmware's shared anonymous-request budget has had
+  /// a chance to recover.
+  ///
+  /// The first miss holds for [noAnswerHoldBase]; each further consecutive
+  /// miss (no answer landing in between) doubles the previous hold, capped
+  /// at [noAnswerHoldMax]. A no-op when [keyHex] does not normalize to a
+  /// full public key.
+  void recordNoAnswer(String keyHex, int nowSec) {
+    final key = normalizePublicKey(keyHex);
+    if (key == null) return;
+    final missCount = (_holds[key]?.missCount ?? 0) + 1;
+    final holdSec = _holdSecondsFor(missCount);
+    final heldUntil = nowSec + holdSec;
+    _holds[key] = _ScopeHold(heldUntil: heldUntil, missCount: missCount);
+    debugLog('[SCOPES] ${_logPrefix(key)}: held for '
+        '${_describeSeconds(holdSec)} after miss #$missCount');
+  }
+
+  /// The hold length for the [missCount]th consecutive miss: [noAnswerHoldBase]
+  /// doubled each further miss, capped at [noAnswerHoldMax].
+  static int _holdSecondsFor(int missCount) {
+    final capSec = noAnswerHoldMax.inSeconds;
+    var sec = noAnswerHoldBase.inSeconds;
+    for (var i = 1; i < missCount; i++) {
+      if (sec >= capSec) return capSec;
+      sec *= 2;
+    }
+    return sec > capSec ? capSec : sec;
+  }
+
+  static String _logPrefix(String keyHex) =>
+      keyHex.length <= 8 ? keyHex : keyHex.substring(0, 8);
+
+  static String _describeSeconds(int sec) {
+    if (sec % 3600 == 0) {
+      final h = sec ~/ 3600;
+      return '$h ${h == 1 ? 'hour' : 'hours'}';
+    }
+    final m = sec ~/ 60;
+    return '$m ${m == 1 ? 'minute' : 'minutes'}';
   }
 
   /// Drops answers the interval no longer needs, then, only if still over
@@ -149,6 +230,17 @@ class ScopeQueryCache {
     debugLog('[SCOPES] Evicted $overflow scope cache '
         '${overflow == 1 ? 'entry' : 'entries'} over the $maxEntries cap');
   }
+}
+
+/// One repeater's no-answer hold, as [ScopeQueryCache] tracks it in memory.
+class _ScopeHold {
+  /// The Unix-second deadline before which the repeater is not due.
+  final int heldUntil;
+
+  /// Consecutive misses (no intervening answer) that produced [heldUntil].
+  final int missCount;
+
+  const _ScopeHold({required this.heldUntil, required this.missCount});
 }
 
 /// The per-device-hour cap on `SCOPES` uploads: [perHour] per hour of the

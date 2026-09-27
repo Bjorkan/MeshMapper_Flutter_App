@@ -638,15 +638,35 @@ Off by default until a region turns it on.
   upgrading later.
 
 - **The due rule and the phone cache** (`lib/services/scope_discovery/scope_discovery_rules.dart`,
-  `isScopeQueryDue`): a repeater is due only when BOTH the server's own `scopes_checked_at` for
-  it (missing, or older than the interval in force, counts as due) AND the phone's own cached
-  answer for it (the same rule) call for a fresh ask, and no earlier answer for it is still
-  being written (`pendingPersist`). The phone cache (`ScopeQueryCache`) only ever remembers an
-  ANSWER: a timeout, a malformed reply, a flood or a radio error is logged and simply leaves no
-  entry behind, so that repeater reads as due again at the very next discovery, however many
-  times that happens. It is JSON in `user_preferences` (`scope_query_cache`), pruned at load to
-  the interval in force and capped at 20,000 entries (oldest evicted first past the cap), so a
-  stamp written just before a crash still suppresses the ask afterward.
+  `isScopeQueryDue`): a repeater is due only when it is not currently held (below), and BOTH the
+  server's own `scopes_checked_at` for it (missing, or older than the interval in force, counts
+  as due) AND the phone's own cached answer for it (the same rule) call for a fresh ask, and no
+  earlier answer for it is still being written (`pendingPersist`). The phone cache
+  (`ScopeQueryCache`) only ever remembers an ANSWER as a durable stamp: a flood, an unreadable
+  reply or a radio error is logged and leaves no entry behind, so that repeater reads as due
+  again at the very next discovery on those outcomes. It is JSON in `user_preferences`
+  (`scope_query_cache`), pruned at load to the interval in force and capped at 20,000 entries
+  (oldest evicted first past the cap), so a stamp written just before a crash still suppresses
+  the ask afterward.
+
+- **The no-answer hold**: a repeater that got no answer at all (`ScopeNoAnswer`) is different
+  from the other non-answer outcomes above, because the repeater firmware answers at most 4
+  anonymous scope requests per 3 minutes, shared across every phone asking it, not just this
+  one. Re-asking a silent repeater on the very next sweep keeps it silent and starves every
+  other phone's turn at the same budget, so this one outcome starts a per-phone hold instead of
+  leaving the repeater due again at once. The first miss holds it for 15 minutes
+  (`ScopeQueryCache.noAnswerHoldBase`); each further consecutive miss (no answer landing in
+  between) doubles the previous hold, capped at 2 hours
+  (`ScopeQueryCache.noAnswerHoldMax`). An answer from that repeater clears its hold and its miss
+  count at once. Only `ScopeNoAnswer` starts or extends a hold: a flood, a radio error, an
+  unreadable reply, a local failure, an abort or a cancel never does, so those outcomes keep
+  re-asking on the very next sweep as before. The hold is memory only, exactly like
+  `pendingPersist`: never written to `toJson`, never read back by `fromJson`, so it does not
+  survive a relaunch, only this phone's own no-server-coordination choice for the run it is in.
+  `isScopeQueryDue` takes the hold as a plain `heldUntil`/`nowSec` pair so the rule itself stays
+  pure; the runner reads it off the cache before choosing candidates and logs one `[SCOPES]` line
+  when a hold starts or extends, and the sweep summary line reports how many candidates were
+  held.
 
 - **Why requests run one at a time, and why pings may run alongside them**: the companion keeps
   one pending request outstanding, the same reason Repeater Administrators' own commands never

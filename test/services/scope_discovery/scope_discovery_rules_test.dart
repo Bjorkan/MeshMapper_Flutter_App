@@ -130,6 +130,57 @@ void main() {
       expect(dueAt7, isTrue, reason: '8 days >= 7 day interval');
       expect(dueAt14, isFalse, reason: '8 days < 14 day interval');
     });
+
+    test('heldUntil in the future: not due, even when both rules pass', () {
+      final due = isScopeQueryDue(
+        onServerList: false,
+        serverCheckedAt: null,
+        phone: null,
+        persistPending: false,
+        nowSec: now,
+        refreshDays: days,
+        heldUntil: now + 1,
+      );
+      expect(due, isFalse);
+    });
+
+    test('heldUntil exactly now: due (the hold has just expired)', () {
+      final due = isScopeQueryDue(
+        onServerList: false,
+        serverCheckedAt: null,
+        phone: null,
+        persistPending: false,
+        nowSec: now,
+        refreshDays: days,
+        heldUntil: now,
+      );
+      expect(due, isTrue);
+    });
+
+    test('heldUntil in the past: due, same as no hold at all', () {
+      final due = isScopeQueryDue(
+        onServerList: false,
+        serverCheckedAt: null,
+        phone: null,
+        persistPending: false,
+        nowSec: now,
+        refreshDays: days,
+        heldUntil: now - 1,
+      );
+      expect(due, isTrue);
+    });
+
+    test('heldUntil null: unaffected (no hold at all)', () {
+      final due = isScopeQueryDue(
+        onServerList: false,
+        serverCheckedAt: null,
+        phone: null,
+        persistPending: false,
+        nowSec: now,
+        refreshDays: days,
+      );
+      expect(due, isTrue);
+    });
   });
 
   group('ScopeQueryCache', () {
@@ -212,6 +263,71 @@ void main() {
       cache.prune(nowSec: now, refreshDays: 36500); // interval keeps all
       expect(cache.toJson().length, ScopeQueryCache.maxEntries);
       expect(cache[oldestKey], isNull, reason: 'the single oldest answer is evicted');
+    });
+
+    test('a repeater that has never missed has no hold', () {
+      final cache = ScopeQueryCache.fromJson(null);
+      expect(cache.heldUntil(keyA), isNull);
+    });
+
+    test('recordNoAnswer holds for 15 minutes on the first miss', () {
+      final cache = ScopeQueryCache.fromJson(null);
+      cache.recordNoAnswer(keyA, now);
+      expect(cache.heldUntil(keyA), now + 15 * 60);
+    });
+
+    test('a second consecutive miss doubles the hold to 30 minutes', () {
+      final cache = ScopeQueryCache.fromJson(null);
+      cache.recordNoAnswer(keyA, now);
+      cache.recordNoAnswer(keyA, now + 1);
+      expect(cache.heldUntil(keyA), now + 1 + 30 * 60);
+    });
+
+    test('a third consecutive miss holds for 60 minutes', () {
+      final cache = ScopeQueryCache.fromJson(null);
+      cache.recordNoAnswer(keyA, now);
+      cache.recordNoAnswer(keyA, now + 1);
+      cache.recordNoAnswer(keyA, now + 2);
+      expect(cache.heldUntil(keyA), now + 2 + 60 * 60);
+    });
+
+    test('the hold caps at 2 hours and stays there', () {
+      final cache = ScopeQueryCache.fromJson(null);
+      var t = now;
+      // 15, 30, 60, 120 (cap reached), 240->120, 480->120
+      for (var i = 0; i < 6; i++) {
+        cache.recordNoAnswer(keyA, t);
+        t += 1;
+      }
+      expect(cache.heldUntil(keyA), (t - 1) + 2 * 3600);
+    });
+
+    test('an answer clears the hold and resets the miss count', () {
+      final cache = ScopeQueryCache.fromJson(null);
+      cache.recordNoAnswer(keyA, now);
+      cache.recordNoAnswer(keyA, now + 1);
+      expect(cache.heldUntil(keyA), isNotNull);
+      cache.recordAnswer(keyA, now + 2);
+      expect(cache.heldUntil(keyA), isNull);
+      // The miss count reset too: the next miss holds for the base 15
+      // minutes again, not a doubled 60.
+      cache.recordNoAnswer(keyA, now + 3);
+      expect(cache.heldUntil(keyA), now + 3 + 15 * 60);
+    });
+
+    test('recordNoAnswer on an unrecognized key is a no-op', () {
+      final cache = ScopeQueryCache.fromJson(null);
+      cache.recordNoAnswer('not-a-key', now);
+      expect(cache.toJson(), isEmpty);
+      expect(cache.heldUntil('not-a-key'), isNull);
+    });
+
+    test('a hold does not survive a cache reload (memory only)', () {
+      final cache = ScopeQueryCache.fromJson(null);
+      cache.recordNoAnswer(keyA, now);
+      expect(cache.heldUntil(keyA), isNotNull);
+      final reloaded = ScopeQueryCache.fromJson(cache.toJson());
+      expect(reloaded.heldUntil(keyA), isNull);
     });
   });
 

@@ -303,17 +303,21 @@ class ScopeRunner {
     final nowSec = _nowSec();
     final refreshDays = _refreshDays();
     final due = <ScopeCandidate>[];
+    var heldCount = 0;
     for (final c in found) {
       final key = normalizePublicKey(c.keyHex);
       if (key == null) continue;
       final info = _serverInfo(key);
+      final heldUntil = _cache.heldUntil(key);
+      if (heldUntil != null && nowSec < heldUntil) heldCount++;
       if (isScopeQueryDue(
           onServerList: info.onList,
           serverCheckedAt: info.checkedAt,
           phone: _cache[key],
           persistPending: _cache.pendingPersist.contains(key),
           nowSec: nowSec,
-          refreshDays: refreshDays)) {
+          refreshDays: refreshDays,
+          heldUntil: heldUntil)) {
         due.add(c);
       }
     }
@@ -326,6 +330,7 @@ class ScopeRunner {
     });
     final chosen = due.take(maxAsksPerSweep).toList();
     debugLog('[SCOPES] Sweep: found ${found.length}, due ${due.length}, '
+        'held $heldCount, '
         'chosen ${chosen.map((c) => _prefix(c.keyHex)).join(', ')}');
 
     for (final c in chosen) {
@@ -394,6 +399,7 @@ class ScopeRunner {
       case ScopeNoAnswer():
         if (_cancel.isCancelled) return false;
         debugLog('[SCOPES] $label: no response');
+        _cache.recordNoAnswer(key, _nowSec());
         _log(c, key, ScopeLogOutcome.noResponse);
         return true;
       case ScopeFlooded():
