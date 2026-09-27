@@ -1056,6 +1056,8 @@ void main() {
         async.flushMicrotasks();
         radio.emit([ResponseCodes.err, ErrorCodes.tableFull]);
         async.flushMicrotasks();
+        radio.emit([ResponseCodes.err, ErrorCodes.notFound]);
+        async.flushMicrotasks();
         expect(conn.scopeCannotAskNonContacts, isTrue);
       });
       // A fresh connection object (a reconnect) starts clean, even though

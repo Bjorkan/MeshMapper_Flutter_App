@@ -1270,6 +1270,29 @@ void main() {
         expect(h.enqueued.single.answer.scopes, ['Ottawa']);
       });
     });
+
+    test(
+        'three blocked strongest repeaters do not starve a weaker saved '
+        'contact out of the top 3', () {
+      _run((async, h) {
+        h.cannotAskNonContacts = true;
+        h.knownNonContacts.addAll([_key(0x11), _key(0x22), _key(0x33)]);
+        h.radio.scripts[_key(0x44)] = _Script.answers('Ottawa');
+        final found = [
+          _cand(0x11, rssi: -50),
+          _cand(0x22, rssi: -55),
+          _cand(0x33, rssi: -60),
+          _cand(0x44, rssi: -65),
+        ];
+        _start(async, h.build(), found);
+        async.elapse(const Duration(seconds: 30));
+        // The three known non-contacts are filtered out before the top-3
+        // cut, not skipped after it, so the 4th (weaker but askable)
+        // repeater gets a slot instead of being starved forever.
+        expect(h.radio.asks.map((a) => a.key), [_key(0x44)]);
+        expect(h.radio.acquires, 1);
+      });
+    });
   });
 
   group('on a real connection', () {

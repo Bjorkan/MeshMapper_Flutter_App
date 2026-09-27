@@ -264,14 +264,19 @@ void main() {
       async.flushMicrotasks();
       radio.emit([ResponseCodes.err, ErrorCodes.tableFull]);
       async.flushMicrotasks();
+      // The ambiguous ERR 3 on a non-contact send is confirmed with one more
+      // lookup before the outcome lands; answer it not-found here so this
+      // generic test does not hang on an unanswered exchange.
+      radio.emit([ResponseCodes.err, ErrorCodes.notFound]);
+      async.flushMicrotasks();
       expect(outcome, isA<ScopeRadioError>());
       expect((outcome! as ScopeRadioError).code, ErrorCodes.tableFull);
     });
   });
 
   group('a full contact table', () {
-    test('a table-full send to a non-contact sets the connection flag and '
-        'marks the outcome', () {
+    test('a table-full send to a non-contact, confirmed still absent, sets '
+        'the connection flag and marks the outcome', () {
       onScopeClock(ScopeRadio.new, (async, radio, conn) {
         expect(conn.scopeCannotAskNonContacts, isFalse);
         ScopeRequestOutcome? outcome;
@@ -280,13 +285,45 @@ void main() {
         async.flushMicrotasks();
         radio.emit([ResponseCodes.err, ErrorCodes.tableFull]);
         async.flushMicrotasks();
+        // The confirming re-lookup: still not a contact, so the anon
+        // contact really could not be allocated.
+        expect(radio.commands.last, CommandCodes.getContactByKey);
+        radio.emit([ResponseCodes.err, ErrorCodes.notFound]);
+        async.flushMicrotasks();
         expect(outcome, isA<ScopeRadioError>());
         final err = outcome! as ScopeRadioError;
         expect(err.code, ErrorCodes.tableFull);
         expect(err.nonContactTableFull, isTrue);
         expect(conn.scopeCannotAskNonContacts, isTrue);
-        expect(radio.commands,
-            [CommandCodes.getContactByKey, CommandCodes.sendAnonReq]);
+        expect(radio.commands, [
+          CommandCodes.getContactByKey,
+          CommandCodes.sendAnonReq,
+          CommandCodes.getContactByKey,
+        ]);
+      });
+    });
+
+    test('a table-full send to a non-contact, but the re-lookup now finds '
+        'it, never sets the flag (the packet pool was full, not the table)',
+        () {
+      onScopeClock(ScopeRadio.new, (async, radio, conn) {
+        ScopeRequestOutcome? outcome;
+        ask(async, conn, (o) => outcome = o);
+        radio.emit([ResponseCodes.err, ErrorCodes.notFound]);
+        async.flushMicrotasks();
+        radio.emit([ResponseCodes.err, ErrorCodes.tableFull]);
+        async.flushMicrotasks();
+        expect(radio.commands.last, CommandCodes.getContactByKey);
+        // The confirming re-lookup: the anon contact WAS allocated after
+        // all, so `addContact` succeeded and `sendAnonReq` itself failed
+        // for an unrelated (transient) reason.
+        radio.emit(contactFrame(scopeContactPayload(pubkey: key)));
+        async.flushMicrotasks();
+        expect(outcome, isA<ScopeRadioError>());
+        final err = outcome! as ScopeRadioError;
+        expect(err.code, ErrorCodes.tableFull);
+        expect(err.nonContactTableFull, isFalse);
+        expect(conn.scopeCannotAskNonContacts, isFalse);
       });
     });
 
@@ -322,6 +359,8 @@ void main() {
         async.flushMicrotasks();
         radio.emit([ResponseCodes.err, ErrorCodes.tableFull]);
         async.flushMicrotasks();
+        radio.emit([ResponseCodes.err, ErrorCodes.notFound]);
+        async.flushMicrotasks();
         expect(conn.scopeCannotAskNonContacts, isTrue);
 
         final before = radio.commands.length;
@@ -343,6 +382,8 @@ void main() {
         radio.emit([ResponseCodes.err, ErrorCodes.notFound]);
         async.flushMicrotasks();
         radio.emit([ResponseCodes.err, ErrorCodes.tableFull]);
+        async.flushMicrotasks();
+        radio.emit([ResponseCodes.err, ErrorCodes.notFound]);
         async.flushMicrotasks();
         expect(conn.scopeCannotAskNonContacts, isTrue);
 

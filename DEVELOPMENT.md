@@ -794,21 +794,42 @@ Off by default until a region turns it on.
   one for the one request), and when the user's own contact table is already full the radio
   refuses with `ERR_CODE_TABLE_FULL` (3) instead of sending. MeshCore fixed this in v1.17.0 with
   8 reserved transient slots, but both versions report the same firmware code (13), so the app
-  cannot tell them apart from `DEVICE_INFO` alone. Instead it adapts per connection: the first
-  time a non-contact's send comes back ERR 3, `MeshCoreConnection.scopeCannotAskNonContacts`
-  latches true for the rest of that connection (a saved contact's own ERR 3 never sets it, and a
-  reconnect builds a new connection object and clears it). From then on the runner remembers
-  every key its own lookup already proved is not a contact (`ScopeRunner`'s per-connection
-  `knownNonContacts`, held the same way as `pendingRestores`) and skips it without even taking a
-  lease; a repeater of unknown status is still looked up (a local BLE read, no airtime) and, if
-  the lookup says not-a-contact, the lease ends right there without writing the send
-  (`ScopeNonContactRefused`, a debug log line only, never a log tab entry). A saved contact is
-  asked exactly as before, flag or no flag. The log tab shows the ERR 3 that sets the flag as
-  "Radio contact list full" (`ScopeLogOutcome.radioContactsFull`) rather than the generic "Radio
-  error", and while connected with the flag set the Scope Discovery tile grows a note naming the
-  fix (companion firmware v1.17 or newer, or removing some contacts), fired only on the
-  transition through `MeshCoreConnection.onScopeCannotAskNonContactsChanged` (a plain
-  `notifyListeners()`, never a `mapRevision` bump, per Rule 9).
+  cannot tell them apart from `DEVICE_INFO` alone.
+
+  **ERR 3 is ambiguous, and the app confirms it before believing it.** The same error code also
+  answers a transient, unrelated failure: `BaseChatMesh::sendAnonReq` returns `MSG_SEND_FAILED`,
+  which the companion also writes as `ERR_CODE_TABLE_FULL`, whenever its own packet allocation
+  fails (an empty packet pool), whatever the recipient was, contact table full or not. So an ERR
+  3 on a non-contact's send does not by itself prove the table is full: the anon contact may have
+  been allocated fine and the send itself failed for an unrelated, transient reason. Before
+  latching anything, `ScopeLease` asks once more, inside the same lease
+  (`_confirmContactNotAllocated`, `CMD_GET_CONTACT_BY_KEY` for the same key, obeying the lease's
+  own deadline and reply-ledger rules): `CMD_GET_CONTACT_BY_KEY` reads the very table `addContact`
+  just inserted into, so finding the contact now means the slot exists and the failure was the
+  packet pool, not the table (verified against both `companion-v1.16.0` and current `dev`: both
+  read `lookupContactByPubKey` off the same table `addContact` writes, so a transient anon contact
+  is found by a follow-up lookup in either firmware). Only a re-lookup that answers
+  `ERR_CODE_NOT_FOUND` (the contact really could not be allocated) latches the flag; a re-lookup
+  that finds the contact, answers anything else, or has no time left in the lease to even run,
+  does not latch, and the ask is logged as an ordinary radio error instead.
+
+  Once latched, `MeshCoreConnection.scopeCannotAskNonContacts` stays true for the rest of that
+  connection (a saved contact's own ERR 3 never reaches the confirmation step at all, so it never
+  sets it, and a reconnect builds a new connection object and clears it). From then on the runner
+  remembers every key its own lookup already proved is not a contact (`ScopeRunner`'s
+  per-connection `knownNonContacts`, held the same way as `pendingRestores`) and filters those keys
+  out before choosing the sweep's top 3, not after: a known non-contact stealing a top-3 slot only
+  to be skipped there would starve a weaker, askable repeater (a saved contact, or one not yet
+  proven a non-contact) out of every sweep for the rest of the connection. A repeater of unknown
+  status is still looked up (a local BLE read, no airtime) and, if the lookup says not-a-contact,
+  the lease ends right there without writing the send (`ScopeNonContactRefused`, a debug log line
+  only, never a log tab entry). A saved contact is asked exactly as before, flag or no flag. The
+  log tab shows the ERR 3 that sets the flag as "Radio contact list full"
+  (`ScopeLogOutcome.radioContactsFull`) rather than the generic "Radio error", and while connected
+  with the flag set the Scope Discovery tile grows a note naming the fix (companion firmware v1.17
+  or newer, or removing some contacts), fired only on the transition through
+  `MeshCoreConnection.onScopeCannotAskNonContactsChanged` (a plain `notifyListeners()`, never a
+  `mapRevision` bump, per Rule 9).
 
 - **Choosing repeaters and the distance gate**: strongest local RSSI first, local SNR to break
   a tie, then the repeater's key for a stable order past that; at most 3 per sweep

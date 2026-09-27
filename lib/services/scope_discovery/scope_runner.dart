@@ -308,11 +308,20 @@ class ScopeRunner {
 
     final nowSec = _nowSec();
     final refreshDays = _refreshDays();
+    final cannotAskNonContacts = _cannotAskNonContacts();
     final due = <ScopeCandidate>[];
     var heldCount = 0;
+    var blockedCount = 0;
     for (final c in found) {
       final key = normalizePublicKey(c.keyHex);
       if (key == null) continue;
+      // Filtered before the top-3 cut, not inside _ask: a known non-contact
+      // must never occupy a slot a weaker, askable repeater (a saved
+      // contact, or one not yet proven non-contact) could have used.
+      if (cannotAskNonContacts && _knownNonContacts.contains(key)) {
+        blockedCount++;
+        continue;
+      }
       final info = _serverInfo(key);
       final heldUntil = _cache.heldUntil(key);
       if (heldUntil != null && nowSec < heldUntil) heldCount++;
@@ -336,7 +345,7 @@ class ScopeRunner {
     });
     final chosen = due.take(maxAsksPerSweep).toList();
     debugLog('[SCOPES] Sweep: found ${found.length}, due ${due.length}, '
-        'held $heldCount, '
+        'held $heldCount, blocked $blockedCount, '
         'chosen ${chosen.map((c) => _prefix(c.keyHex)).join(', ')}');
 
     for (final c in chosen) {
@@ -348,11 +357,6 @@ class ScopeRunner {
   Future<bool> _ask(ScopeCandidate c, DateTime hardStop) async {
     final key = normalizePublicKey(c.keyHex)!;
     final label = _prefix(key);
-    if (_cannotAskNonContacts() && _knownNonContacts.contains(key)) {
-      debugLog('[SCOPES] $label: known non-contact and this connection '
-          'cannot ask non-contacts, skipping without a lease');
-      return true;
-    }
     final wait = _waitFor(c);
     if (!_mayAsk(c)) return false;
     final needed = leaseAdmissionWait + kScopeLeaseHold + wait;

@@ -364,8 +364,9 @@ class ScopeLease implements ScopeLeaseHandle {
           '${isErr ? ' (error code $code)' : ''}');
       if (borrowed != null) await _restore(borrowed);
       if (isErr) {
-        final nonContactTableFull =
-            contact == null && code == ErrorCodes.tableFull;
+        final nonContactTableFull = contact == null &&
+            code == ErrorCodes.tableFull &&
+            await _confirmContactNotAllocated(pubkey, label);
         if (nonContactTableFull) _host.markCannotAskNonContacts();
         return _radioError(code, borrowed,
             nonContactTableFull: nonContactTableFull);
@@ -577,6 +578,33 @@ class ScopeLease implements ScopeLeaseHandle {
     }
     _end(_LeaseEnd.released);
     return outcome;
+  }
+
+  /// ERR_CODE_TABLE_FULL answers a non-contact's send for two different
+  /// reasons the firmware does not distinguish: the anon contact could not
+  /// be allocated (genuinely no free slot), or it WAS allocated and the send
+  /// itself failed for an unrelated, transient reason (an empty packet
+  /// pool: `BaseChatMesh::sendAnonReq` returns `MSG_SEND_FAILED` whenever its
+  /// own packet allocation fails, whatever `recipient` was). One more lookup
+  /// for the same key tells them apart, since `CMD_GET_CONTACT_BY_KEY` reads
+  /// the very table `addContact` just inserted into: found means the slot
+  /// exists, so this was not a table-full failure. True only when that
+  /// lookup answers ERR_CODE_NOT_FOUND; false when it finds the contact,
+  /// answers anything else, or there is no time left in the lease to even
+  /// ask (the lease deadline and reply-ledger rules are [_exchange]'s own).
+  Future<bool> _confirmContactNotAllocated(
+      Uint8List pubkey, String label) async {
+    final confirm = await _exchange(
+        Uint8List.fromList([CommandCodes.getContactByKey, ...pubkey]));
+    if (confirm is! _Frame) return false;
+    final cf = confirm.frame;
+    if (cf[0] == ResponseCodes.contact) {
+      debugLog('[SCOPES] $label: the anon contact was allocated, so ERR 3 '
+          'was a packet pool failure, not a full table');
+      return false;
+    }
+    return cf[0] == ResponseCodes.err &&
+        (cf.length > 1 ? cf[1] : 0) == ErrorCodes.notFound;
   }
 
   ScopeRequestOutcome _localFailure(String why, ContactRecord? borrowed) {
