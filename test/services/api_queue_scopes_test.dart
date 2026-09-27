@@ -121,6 +121,40 @@ void main() {
       );
       expect(item.toApiJson()['public_key'], key1);
     });
+
+    test('a 0x prefix and surrounding whitespace are normalized away', () {
+      final item = ApiQueueItem.fromScopes(
+        publicKeyHex: '  0x${key1.toLowerCase()} ',
+        scopes: ['*'],
+        lat: 45.0,
+        lon: -75.0,
+        timestamp: 1757400000,
+      );
+      expect(item.heardRepeats, key1);
+      expect(item.toApiJson()['public_key'], key1);
+    });
+
+    for (final bad in <String, String>{
+      'empty': '',
+      'too short': key1.substring(0, 63),
+      'too long': '${key1}A',
+      'not hex': 'G${key1.substring(1)}',
+      'inner whitespace': '${key1.substring(0, 32)} ${key1.substring(32)}',
+      'a short id': 'A3B2C1',
+    }.entries) {
+      test('a malformed key (${bad.key}) throws ArgumentError', () {
+        expect(
+          () => ApiQueueItem.fromScopes(
+            publicKeyHex: bad.value,
+            scopes: ['*'],
+            lat: 45.0,
+            lon: -75.0,
+            timestamp: 1757400000,
+          ),
+          throwsArgumentError,
+        );
+      });
+    }
   });
 
   group('enqueueScopes', () {
@@ -365,6 +399,154 @@ void main() {
       expect(queue.queueSize, 1);
       final json = await queue.extractAllAsJson();
       expect(json.single['type'], 'SCOPES');
+    });
+
+    // A disconnect that lands while the FIRST Hive write is failing (or
+    // while its recovery runs) must not let the recovery retry, the retry
+    // itself, or the memory fallback put the answer back into a cleared
+    // queue. Each of these fails if the generation check guarding its step
+    // is removed from enqueueScopes.
+    group('a disconnect while the first Hive write is failing', () {
+      late Directory dir;
+      late Box<ApiQueueItem> recoveredInner;
+
+      setUp(() async {
+        dir = await Directory.systemTemp.createTemp('mm_scopes_race_');
+        Hive.init(dir.path);
+        // No init() here (it would open the real queue box), so register
+        // the adapter it would have, or a real write could never land.
+        if (!Hive.isAdapterRegistered(3)) {
+          Hive.registerAdapter(ApiQueueItemAdapter());
+        }
+        recoveredInner = await Hive.openBox<ApiQueueItem>('scopes_recovered');
+      });
+
+      tearDown(() async {
+        await Hive.close();
+        await dir.delete(recursive: true);
+      });
+
+      Future<bool> enqueue(ApiQueueService queue, int gen) =>
+          queue.enqueueScopes(
+            publicKeyHex: key1,
+            scopes: ['*'],
+            lat: 45.0,
+            lon: -75.0,
+            timestamp: 1757400000,
+            expectedGeneration: gen,
+          );
+
+      for (final clearWhile in ['the write is failing', 'recovery runs']) {
+        test(
+            'recovery: cleared while $clearWhile, the recovered box is never '
+            'written to and nothing is inserted', () async {
+          final queue = newQueue();
+          final gen = queue.generation;
+          Future<void>? clearing;
+          final failing = _ScriptedBox(null)
+            ..failAdd = true
+            ..beforeAdd = clearWhile == 'the write is failing'
+                ? () async {
+                    clearing = queue.clearOnDisconnect();
+                  }
+                : null;
+          if (clearWhile == 'recovery runs') {
+            // Fires inside _recoverBox, after the corrupt box is deleted and
+            // before the fresh one is opened.
+            queue.onStorageCleanup = (_) {
+              clearing = queue.clearOnDisconnect();
+            };
+          }
+          final recovered = _ScriptedBox(recoveredInner);
+          queue.testBox = failing;
+          queue.reopenBoxForRecovery = () async => recovered;
+
+          final ok = await enqueue(queue, gen);
+          await clearing;
+
+          expect(ok, isFalse);
+          expect(failing.addCalls, 1);
+          expect(recovered.addCalls, 0,
+              reason: 'the retry must not be attempted after the clear');
+          expect(recoveredInner.length, 0);
+          expect(queue.heldItems, isEmpty);
+        });
+      }
+
+      test(
+          'retry: the recovered write lands after the clear, is undone, and '
+          'nothing is inserted', () async {
+        final queue = newQueue();
+        final gen = queue.generation;
+        final failing = _ScriptedBox(null)..failAdd = true;
+        final recovered = _ScriptedBox(recoveredInner)
+          // The clear lands while the retry write is pending, then the
+          // retry itself succeeds.
+          ..beforeAdd = () => queue.clearOnDisconnect();
+        queue.testBox = failing;
+        queue.reopenBoxForRecovery = () async => recovered;
+
+        final ok = await enqueue(queue, gen);
+
+        expect(ok, isFalse);
+        expect(recovered.addCalls, 1, reason: 'the retry did run');
+        expect(recoveredInner.length, 0,
+            reason: 'the late retry write must be undone');
+        expect(queue.heldItems, isEmpty);
+      });
+
+      test(
+          'memory fallback: the retry also fails after the clear, and the '
+          'item is not put in memory', () async {
+        final queue = newQueue();
+        final gen = queue.generation;
+        final failing = _ScriptedBox(null)..failAdd = true;
+        Future<void>? clearing;
+        final recovered = _ScriptedBox(recoveredInner)
+          ..failAdd = true
+          ..beforeAdd = () async {
+            clearing = queue.clearOnDisconnect();
+          };
+        queue.testBox = failing;
+        queue.reopenBoxForRecovery = () async => recovered;
+
+        final ok = await enqueue(queue, gen);
+        await clearing;
+
+        expect(ok, isFalse);
+        expect(recovered.addCalls, 1);
+        expect(queue.heldItems, isEmpty,
+            reason: 'nothing may land in the memory fallback');
+        expect(queue.queueSize, 0);
+      });
+
+      test('control: with no clear, the recovered retry lands in Hive and '
+          'returns true', () async {
+        final queue = newQueue();
+        final failing = _ScriptedBox(null)..failAdd = true;
+        final recovered = _ScriptedBox(recoveredInner);
+        queue.testBox = failing;
+        queue.reopenBoxForRecovery = () async => recovered;
+
+        final ok = await enqueue(queue, queue.generation);
+
+        expect(ok, isTrue);
+        expect(recoveredInner.values.single.type, 'SCOPES');
+      });
+
+      test('control: with no clear, the same failing path still falls back '
+          'to memory and returns true', () async {
+        final queue = newQueue();
+        final failing = _ScriptedBox(null)..failAdd = true;
+        final recovered = _ScriptedBox(recoveredInner)..failAdd = true;
+        queue.testBox = failing;
+        queue.reopenBoxForRecovery = () async => recovered;
+
+        final ok = await enqueue(queue, queue.generation);
+
+        expect(ok, isTrue);
+        expect(queue.heldItems.single.type, 'SCOPES');
+      });
     });
 
     group('offline mode', () {
@@ -849,3 +1031,46 @@ void main() {
 }
 
 enum UploadOutcome { success, retryable }
+
+/// A queue box whose writes a test can script. With no [inner] box it holds
+/// nothing (the corrupt box a failing write came from); with one, it
+/// forwards to that real box so a write that lands really lands.
+class _ScriptedBox implements Box<ApiQueueItem> {
+  _ScriptedBox(this.inner);
+
+  final Box<ApiQueueItem>? inner;
+
+  /// Throw on every add, the way a corrupt box does.
+  bool failAdd = false;
+
+  /// Runs (and is awaited) inside every add, before it fails or lands.
+  Future<void> Function()? beforeAdd;
+
+  int addCalls = 0;
+
+  @override
+  Future<int> add(ApiQueueItem value) async {
+    addCalls++;
+    await beforeAdd?.call();
+    if (failAdd) throw HiveError('scripted write failure');
+    return inner!.add(value);
+  }
+
+  @override
+  Future<int> clear() async => await inner?.clear() ?? 0;
+
+  @override
+  Future<void> close() async {}
+
+  @override
+  int get length => inner?.length ?? 0;
+
+  @override
+  Iterable<ApiQueueItem> get values => inner?.values ?? const [];
+
+  @override
+  bool get isOpen => true;
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
+}

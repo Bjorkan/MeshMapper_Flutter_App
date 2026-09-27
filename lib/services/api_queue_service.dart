@@ -151,6 +151,11 @@ class OfflineChunkedUploadResult {
 /// perform whatever retry the caller wants and return true only on an
 /// eventual success. The loop stops at the first chunk that returns false,
 /// so every row from that chunk on is left un-uploaded.
+///
+/// This function, not [uploadChunk], decides what reaches the custom API:
+/// [forwardChunk] is called once for each chunk that uploaded, right after
+/// it did, with exactly that chunk's rows. A chunk that failed and every
+/// chunk after it are never forwarded, and no chunk is forwarded twice.
 Future<OfflineChunkedUploadResult> runOfflineChunkedUpload(
   List<Map<String, dynamic>> rows, {
   required bool scopeDiscoveryOffered,
@@ -162,6 +167,8 @@ Future<OfflineChunkedUploadResult> runOfflineChunkedUpload(
     int chunkNumber,
     int totalChunks,
   ) uploadChunk,
+  required void Function(List<Map<String, dynamic>> chunk, int chunkNumber)
+      forwardChunk,
 }) async {
   final stripped = scopeDiscoveryOffered ? rows : withoutScopesItems(rows);
   final removedScopesCount = rows.length - stripped.length;
@@ -180,6 +187,7 @@ Future<OfflineChunkedUploadResult> runOfflineChunkedUpload(
     final ok = await uploadChunk(chunk, chunkNumber, totalChunks);
     if (!ok) break;
     uploadedCount += chunk.length;
+    forwardChunk(chunk, chunkNumber);
   }
 
   return OfflineChunkedUploadResult(
@@ -426,6 +434,13 @@ class ApiQueueService {
     }
   }
 
+  /// Opens the fresh box [_recoverBox] switches to after deleting the
+  /// corrupt one. Production always opens the real queue box; a test swaps
+  /// this to control what the recovered box does with the retried write.
+  @visibleForTesting
+  Future<Box<ApiQueueItem>> Function() reopenBoxForRecovery =
+      () => Hive.openBox<ApiQueueItem>(_boxName);
+
   /// Recover from runtime Hive corruption by closing, deleting, and reopening the box
   Future<void> _recoverBox() async {
     if (_isRecovering) {
@@ -449,8 +464,8 @@ class ApiQueueService {
       await Hive.deleteBoxFromDisk(_boxName);
       onStorageCleanup?.call('Queue storage was corrupted and has been reset');
 
-      final box = await Hive.openBox<ApiQueueItem>(_boxName)
-          .timeout(const Duration(seconds: 5));
+      final box =
+          await reopenBoxForRecovery().timeout(const Duration(seconds: 5));
       _box = box;
       debugLog('[API QUEUE] Box recovered successfully');
     } catch (e) {
@@ -885,26 +900,30 @@ class ApiQueueService {
       }
     }
 
-    if (expectedGeneration != _generation) {
-      // The clear that bumped the generation may have run while the write
-      // above (or its recovery) was in flight. Whatever landed belongs to a
-      // queue that no longer exists, so undo it rather than leave it queued.
-      if (wrote) {
+    if (wrote) {
+      if (expectedGeneration != _generation) {
+        // The clear that bumped the generation may have run while the write
+        // above (or its retry) was in flight. What landed belongs to a queue
+        // that no longer exists, so undo it rather than leave it queued.
         try {
           await item.delete();
         } catch (_) {}
+        debugWarn(
+            '[API QUEUE] SCOPES dropped: queue generation changed during write (queue was cleared)');
+        return false;
       }
-      debugWarn(
-          '[API QUEUE] SCOPES dropped: queue generation changed during write (queue was cleared)');
-      return false;
-    }
-
-    if (!wrote) {
+      debugLog('[API QUEUE] SCOPES enqueued (queue size: $queueSize)');
+    } else {
+      // Every Hive attempt failed. A clear may have landed while the last
+      // of them was failing, so check again before the memory fallback.
+      if (expectedGeneration != _generation) {
+        debugWarn(
+            '[API QUEUE] SCOPES dropped: queue generation changed before memory fallback (queue was cleared)');
+        return false;
+      }
       _memoryQueue.add(item);
       debugLog(
           '[API QUEUE] SCOPES enqueued (memory fallback) (queue size: $queueSize)');
-    } else {
-      debugLog('[API QUEUE] SCOPES enqueued (queue size: $queueSize)');
     }
     onQueueUpdated?.call(queueSize);
     _schedulePingFlush();

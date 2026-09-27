@@ -8744,12 +8744,6 @@ class AppStateProvider extends ChangeNotifier with WidgetsBindingObserver {
         if (result == UploadResult.success) {
           debugLog(
               '[OFFLINE] Uploaded batch $chunkNumber: ${chunk.length} pings');
-          _forwardOfflineBatchToCustomApi(
-            chunk,
-            batchNum: chunkNumber,
-            publicKey: uploadPublicKey,
-            auth: effectiveAuth!,
-          );
           return true;
         }
 
@@ -8764,6 +8758,12 @@ class AppStateProvider extends ChangeNotifier with WidgetsBindingObserver {
             '[OFFLINE] Batch $chunkNumber stopped ($stopReason), preserving remaining pings');
         return false;
       },
+      forwardChunk: (chunk, chunkNumber) => _forwardOfflineBatchToCustomApi(
+        chunk,
+        batchNum: chunkNumber,
+        publicKey: uploadPublicKey,
+        auth: effectiveAuth!,
+      ),
     );
 
     final orderedPings = chunkedResult.orderedRows;

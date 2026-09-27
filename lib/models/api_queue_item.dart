@@ -318,10 +318,11 @@ class ApiQueueItem extends HiveObject {
   /// repeater fact, not a session-mode analytics stamp.
   ///
   /// [publicKeyHex] is normalized to 64 upper-case hex via
-  /// [normalizePublicKey]. A malformed key (the caller should already have
-  /// refused it, `ApiQueueService.enqueueScopes` does) is stored as given
-  /// rather than dropped here, since a factory cannot fail; the server
-  /// still rejects the whole item.
+  /// [normalizePublicKey], so the item never serializes any other shape.
+  /// Anything that does not normalize throws [ArgumentError]: the server
+  /// would reject the whole item, and a caller that can meet a bad key
+  /// (`ApiQueueService.enqueueScopes` does) validates it first and refuses
+  /// it without building the item.
   factory ApiQueueItem.fromScopes({
     required String publicKeyHex,
     required List<String> scopes,
@@ -330,12 +331,17 @@ class ApiQueueItem extends HiveObject {
     required int timestamp,
     String? radioFreq,
   }) {
+    final key = normalizePublicKey(publicKeyHex);
+    if (key == null) {
+      throw ArgumentError.value(publicKeyHex, 'publicKeyHex',
+          'must be a 64 hex character public key');
+    }
     return ApiQueueItem(
       type: 'SCOPES',
       latitude: lat,
       longitude: lon,
       timestamp: DateTime.fromMillisecondsSinceEpoch(timestamp * 1000),
-      heardRepeats: normalizePublicKey(publicKeyHex) ?? publicKeyHex,
+      heardRepeats: key,
       canUploadAfter: DateTime.now().millisecondsSinceEpoch, // Immediate
       externalAntenna: false,
       scopes: scopes,
