@@ -75,6 +75,18 @@ bool scopeRepeaterRefreshDue({
   return (refreshNow: refreshNow, armTimer: true);
 }
 
+/// Whether a periodic scope-discovery repeater-refresh tick should do
+/// anything: scope discovery must still be active, Passive or Hybrid must
+/// still be the mode running (a stray tick after a mode switch that
+/// bypassed the timer's own stop must not refresh for a mode it no longer
+/// serves), and there must be a known zone.
+bool scopePeriodicRefreshShouldRun({
+  required bool active,
+  required bool passiveOrHybridRunning,
+  required String? zone,
+}) =>
+    active && passiveOrHybridRunning && zone != null && zone.isNotEmpty;
+
 /// Whether replacing [before] with [after] changes anything the map draws.
 ///
 /// Every repeater field reaches the map (its marker, its colour, its detail

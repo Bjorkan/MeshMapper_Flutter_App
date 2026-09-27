@@ -187,14 +187,35 @@ class ScopeLifecycle {
   bool get modeSwitching => _modeSwitches > 0;
 
   /// Called whenever a gate input changes outside the stop events: a live
-  /// `/auth` answer (a session recovery included) that drops or disables
-  /// `scope_discovery`, or the user's own switch. A gate that is now closed
-  /// stops the periodic repeater refresh timer (whether or not a request
-  /// happens to be running) and cancels a live runner at once, so a lease
-  /// mid-exchange writes nothing more (no borrow, no scope request). An
-  /// open gate changes nothing.
-  void onGateChanged(ScopeGateInputs gate) {
-    if (scopeDiscoveryGateOpen(gate)) return;
+  /// `/auth` answer (a session recovery included) that drops or restores
+  /// `scope_discovery`, or the user's own switch.
+  ///
+  /// A gate that is now closed stops the periodic repeater refresh timer
+  /// (whether or not a request happens to be running) and cancels a live
+  /// runner at once, so a lease mid-exchange writes nothing more (no
+  /// borrow, no scope request).
+  ///
+  /// A gate that is now OPEN re-arms the periodic repeater refresh via
+  /// [startRepeaterRefresh] (the same mode-start sequence, 5-minute stale
+  /// check included) when [passiveOrHybridRunning] and no refresh is
+  /// already scheduled: turning scope discovery off and back on again while
+  /// Passive or Hybrid keeps running must not leave the refresh stopped for
+  /// the rest of the session, only to be caught by the mode's own next
+  /// start or stop. Already running (or the mode not running at all) is a
+  /// no-op, so an unrelated gate check does not keep rescheduling it.
+  void onGateChanged(
+    ScopeGateInputs gate, {
+    required bool passiveOrHybridRunning,
+    required void Function() startRepeaterRefresh,
+  }) {
+    if (scopeDiscoveryGateOpen(gate)) {
+      if (passiveOrHybridRunning && !repeaterRefreshTimerRunning) {
+        debugLog('[SCOPES] Scope discovery switched back on with the mode '
+            'still running: re-arming the periodic repeater refresh');
+        startRepeaterRefresh();
+      }
+      return;
+    }
     stopRepeaterRefreshTimer();
     final live = _live;
     if (live == null || live.isCancelled) return;

@@ -329,6 +329,44 @@ void main() {
       final reloaded = ScopeQueryCache.fromJson(cache.toJson());
       expect(reloaded.heldUntil(keyA), isNull);
     });
+
+    test('clearHold clears an existing hold without touching the answer '
+        'stamp', () {
+      final cache = ScopeQueryCache.fromJson(null);
+      cache.recordNoAnswer(keyA, now);
+      cache.recordNoAnswer(keyA, now + 1);
+      expect(cache.heldUntil(keyA), isNotNull);
+      cache.clearHold(keyA);
+      expect(cache.heldUntil(keyA), isNull);
+      // No answer stamp was ever recorded (a real answer that failed to
+      // persist does not get a durable stamp), and clearHold must not
+      // invent one.
+      expect(cache[keyA], isNull);
+    });
+
+    test('clearHold resets the miss count too: the next miss is the base '
+        '15 minutes again', () {
+      final cache = ScopeQueryCache.fromJson(null);
+      cache.recordNoAnswer(keyA, now);
+      cache.recordNoAnswer(keyA, now + 1);
+      cache.clearHold(keyA);
+      cache.recordNoAnswer(keyA, now + 2);
+      expect(cache.heldUntil(keyA), now + 2 + 15 * 60);
+    });
+
+    test('clearHold on a key with no hold is a no-op', () {
+      final cache = ScopeQueryCache.fromJson(null);
+      cache.clearHold(keyA);
+      expect(cache.heldUntil(keyA), isNull);
+    });
+
+    test('clearHold on an unrecognized key is a no-op', () {
+      final cache = ScopeQueryCache.fromJson(null);
+      cache.recordNoAnswer(keyA, now);
+      cache.clearHold('not-a-key');
+      expect(cache.heldUntil(keyA), isNotNull,
+          reason: 'an unrecognized key must not touch keyA');
+    });
   });
 
   group('ScopeHourlyBudget', () {

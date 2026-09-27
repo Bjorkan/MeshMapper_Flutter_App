@@ -458,7 +458,8 @@ void main() {
       h.lifecycle.startRepeaterRefreshTimer(
           const Duration(minutes: 15), () {});
       expect(h.lifecycle.repeaterRefreshTimerRunning, isTrue);
-      h.lifecycle.onGateChanged(_gate(userEnabled: false));
+      h.lifecycle.onGateChanged(_gate(userEnabled: false),
+          passiveOrHybridRunning: false, startRepeaterRefresh: () {});
       expect(h.lifecycle.repeaterRefreshTimerRunning, isFalse);
     });
 
@@ -466,7 +467,63 @@ void main() {
       final h = _Harness();
       h.lifecycle.startRepeaterRefreshTimer(
           const Duration(minutes: 15), () {});
-      h.lifecycle.onGateChanged(_gate());
+      h.lifecycle.onGateChanged(_gate(),
+          passiveOrHybridRunning: true, startRepeaterRefresh: () {});
+      expect(h.lifecycle.repeaterRefreshTimerRunning, isTrue);
+    });
+
+    test('onGateChanged re-arms the refresh when the gate reopens while '
+        'Passive or Hybrid is still running', () {
+      final h = _Harness();
+      h.lifecycle.startRepeaterRefreshTimer(
+          const Duration(minutes: 15), () {});
+      // The gate closes (mode still running): the timer stops.
+      h.lifecycle.onGateChanged(_gate(userEnabled: false),
+          passiveOrHybridRunning: true, startRepeaterRefresh: () {});
+      expect(h.lifecycle.repeaterRefreshTimerRunning, isFalse);
+
+      // The gate reopens with the mode still running: re-armed via the
+      // same sequence a fresh mode start uses.
+      var rearmed = false;
+      h.lifecycle.onGateChanged(_gate(),
+          passiveOrHybridRunning: true,
+          startRepeaterRefresh: () {
+            rearmed = true;
+            h.lifecycle.startRepeaterRefreshTimer(
+                const Duration(minutes: 15), () {});
+          });
+      expect(rearmed, isTrue);
+      expect(h.lifecycle.repeaterRefreshTimerRunning, isTrue);
+    });
+
+    test('onGateChanged does not re-arm when the gate reopens but Passive '
+        'or Hybrid is not running', () {
+      final h = _Harness();
+      h.lifecycle.startRepeaterRefreshTimer(
+          const Duration(minutes: 15), () {});
+      h.lifecycle.onGateChanged(_gate(userEnabled: false),
+          passiveOrHybridRunning: false, startRepeaterRefresh: () {});
+      expect(h.lifecycle.repeaterRefreshTimerRunning, isFalse);
+
+      var rearmed = false;
+      h.lifecycle.onGateChanged(_gate(),
+          passiveOrHybridRunning: false,
+          startRepeaterRefresh: () => rearmed = true);
+      expect(rearmed, isFalse);
+      expect(h.lifecycle.repeaterRefreshTimerRunning, isFalse);
+    });
+
+    test('onGateChanged does not re-invoke the re-arm callback when the '
+        'timer is already running', () {
+      final h = _Harness();
+      h.lifecycle.startRepeaterRefreshTimer(
+          const Duration(minutes: 15), () {});
+      var called = false;
+      h.lifecycle.onGateChanged(_gate(),
+          passiveOrHybridRunning: true,
+          startRepeaterRefresh: () => called = true);
+      expect(called, isFalse,
+          reason: 'already running: nothing to re-arm');
       expect(h.lifecycle.repeaterRefreshTimerRunning, isTrue);
     });
   });
@@ -505,8 +562,10 @@ void main() {
               firmwareCode: 13,
             );
         final h = _Harness();
-        // The provider's wiring, as in AppStateProvider.
-        api.onScopeDiscoveryChanged = () => h.lifecycle.onGateChanged(gate());
+        // The provider's wiring, as in AppStateProvider. No mode is running
+        // in this test, so the re-arm arm is exercised elsewhere.
+        api.onScopeDiscoveryChanged = () => h.lifecycle.onGateChanged(gate(),
+            passiveOrHybridRunning: false, startRepeaterRefresh: () {});
 
         auth();
         expect(api.scopeDiscoveryOffered, isTrue);
@@ -590,7 +649,8 @@ void main() {
               firmwareCode: 13,
             );
         final h = _Harness();
-        api.onScopeDiscoveryChanged = () => h.lifecycle.onGateChanged(gate());
+        api.onScopeDiscoveryChanged = () => h.lifecycle.onGateChanged(gate(),
+            passiveOrHybridRunning: false, startRepeaterRefresh: () {});
         // The stale tagged TX cleanup, held open by the test.
         final cleanup = Completer<void>();
         final sessionChanges = <String>[];
@@ -700,7 +760,8 @@ void main() {
     test('an answer that keeps it offered cancels nothing', () {
       final h = _Harness();
       final runner = h.build()!;
-      h.lifecycle.onGateChanged(_gate());
+      h.lifecycle.onGateChanged(_gate(),
+          passiveOrHybridRunning: false, startRepeaterRefresh: () {});
       expect(runner.isCancelled, isFalse);
       expect(h.hostCancels, isEmpty);
     });

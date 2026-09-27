@@ -3361,9 +3361,13 @@ class AppStateProvider extends ChangeNotifier with WidgetsBindingObserver {
 
     // A live /auth answer (a session recovery included) can withdraw scope
     // discovery while a lease is mid-exchange; the runner must stop before
-    // its next write, not at the next sweep.
-    _apiService.onScopeDiscoveryChanged =
-        () => _scopeLifecycle.onGateChanged(_scopeGateInputs);
+    // its next write, not at the next sweep. Restoring it while Passive or
+    // Hybrid keeps running re-arms the periodic repeater refresh, the same
+    // sequence a fresh mode start uses.
+    _apiService.onScopeDiscoveryChanged = () => _scopeLifecycle.onGateChanged(
+        _scopeGateInputs,
+        passiveOrHybridRunning: _isPassiveOrHybridModeRunning,
+        startRepeaterRefresh: _startScopeRepeaterRefreshForRunningMode);
 
     _apiService.onRegionalCarpeaters = (keys, error) {
       unawaited(_onRegionalCarpeaters(keys, error));
@@ -8998,7 +9002,9 @@ class AppStateProvider extends ChangeNotifier with WidgetsBindingObserver {
         'externalAntenna=${preferences.externalAntenna}, autoPowerSet=${preferences.autoPowerSet}');
 
     _preferences = preferences;
-    _scopeLifecycle.onGateChanged(_scopeGateInputs);
+    _scopeLifecycle.onGateChanged(_scopeGateInputs,
+        passiveOrHybridRunning: _isPassiveOrHybridModeRunning,
+        startRepeaterRefresh: _startScopeRepeaterRefreshForRunningMode);
 
     // Update user-original baseline when user changes zone-overridable settings
     if (_userOriginalAutoPingInterval != null) {
@@ -10042,6 +10048,10 @@ class AppStateProvider extends ChangeNotifier with WidgetsBindingObserver {
       _autoPingEnabled = false;
       _resetIdleAutoStop();
       await _pingService?.forceDisableAutoPing();
+      // This disables the mode without going through the normal stop
+      // (_finishAutoPingStop), so the periodic scope-discovery repeater
+      // refresh timer needs its own stop here too.
+      _scopeLifecycle.stopRepeaterRefreshTimer();
       debugLog('[ZONE GRACE] Auto-ping paused');
     }
 
@@ -10692,14 +10702,24 @@ class AppStateProvider extends ChangeNotifier with WidgetsBindingObserver {
       unawaited(_refreshRepeatersForScopes(zoneCode!));
     }
     _scopeLifecycle.startRepeaterRefreshTimer(scopeListRefreshPeriod, () {
-      if (!scopeDiscoveryActive) return;
-      final z = zoneCode;
-      if (z == null || z.isEmpty) return;
+      if (!scopePeriodicRefreshShouldRun(
+          active: scopeDiscoveryActive,
+          passiveOrHybridRunning: _isPassiveOrHybridModeRunning,
+          zone: zoneCode)) {
+        return;
+      }
       debugLog('[SCOPES] Periodic repeater list refresh '
           '(${scopeListRefreshPeriod.inMinutes}m)');
-      unawaited(_refreshRepeatersForScopes(z));
+      unawaited(_refreshRepeatersForScopes(zoneCode!));
     });
   }
+
+  /// Whether Passive or Hybrid is the mode currently running: the two modes
+  /// the scope-discovery repeater refresh (mode-start check, periodic
+  /// timer, gate-reopen re-arm) exists for.
+  bool get _isPassiveOrHybridModeRunning =>
+      _autoPingEnabled &&
+      (_autoMode == AutoMode.passive || _autoMode == AutoMode.hybrid);
 
   /// Builds one sweep's scope runner, or null when scope discovery is not
   /// active. Handed to PingService as its factory.

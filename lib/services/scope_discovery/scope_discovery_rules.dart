@@ -150,6 +150,19 @@ class ScopeQueryCache {
     _holds.remove(key);
   }
 
+  /// Clears any no-answer hold and miss count for [keyHex], without
+  /// touching its answer stamp. Unlike [recordAnswer], this is called the
+  /// moment a reply PARSES as a valid scope list, whatever happens to its
+  /// persistence afterward: the repeater proved it is reachable right then,
+  /// so a failed save (or a hourly-cap withholding) must not leave the
+  /// miss count in place for the next ask to double from. A no-op when
+  /// [keyHex] does not normalize to a full public key.
+  void clearHold(String keyHex) {
+    final key = normalizePublicKey(keyHex);
+    if (key == null) return;
+    _holds.remove(key);
+  }
+
   /// The Unix-second deadline before which [keyHex] must not be asked
   /// again, or null when it has no hold (never missed, or its last hold was
   /// cleared by an answer). Also null when [keyHex] does not normalize.

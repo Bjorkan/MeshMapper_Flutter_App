@@ -657,10 +657,16 @@ Off by default until a region turns it on.
   leaving the repeater due again at once. The first miss holds it for 15 minutes
   (`ScopeQueryCache.noAnswerHoldBase`); each further consecutive miss (no answer landing in
   between) doubles the previous hold, capped at 2 hours
-  (`ScopeQueryCache.noAnswerHoldMax`). An answer from that repeater clears its hold and its miss
-  count at once. Only `ScopeNoAnswer` starts or extends a hold: a flood, a radio error, an
-  unreadable reply, a local failure, an abort or a cancel never does, so those outcomes keep
-  re-asking on the very next sweep as before. The hold is memory only, exactly like
+  (`ScopeQueryCache.noAnswerHoldMax`). An answer that PARSES clears its hold and its miss count
+  at once (`ScopeQueryCache.clearHold`, called the moment `parseRegionsReply` succeeds), whatever
+  happens to it afterward: a failed hourly-budget reservation write or a refused enqueue still
+  proved the repeater reachable right then, so neither may leave the miss count in place for the
+  next ask to double from. The durable answer stamp (`recordAnswer`, which clears the hold too,
+  redundant by that point) still waits on a successful persist, since that stamp feeds the OTHER
+  cache rule (the due rule above), not this one. Only `ScopeNoAnswer` starts or extends a hold: a
+  flood, a radio error, an unreadable reply (never parsed, so never cleared either), a local
+  failure, an abort or a cancel never does, so those outcomes keep re-asking on the very next
+  sweep as before. The hold is memory only, exactly like
   `pendingPersist`: never written to `toJson`, never read back by `fromJson`, so it does not
   survive a relaunch, only this phone's own no-server-coordination choice for the run it is in.
   `isScopeQueryDue` takes the hold as a plain `heldUntil`/`nowSec` pair so the rule itself stays
@@ -689,16 +695,35 @@ Off by default until a region turns it on.
   trigger that lands while one is already in flight is a no-op, not a queued retry, since the
   next connect, mode-start or periodic tick asks again anyway.
   The periodic timer (`ScopeLifecycle.startRepeaterRefreshTimer`/`stopRepeaterRefreshTimer`) is
-  a dumb repeating scheduler with no memory of the gate itself; every tick and the mode-start
-  check both re-read `scopeDiscoveryActive` and the zone at the moment they fire. It stops on
-  whichever ends first: the mode itself stopping (`AppStateProvider._finishAutoPingStop`, and the
-  mode-switch teardown inside `toggleAutoPing`'s start branch, since switching between two
-  running modes never passes through `_finishAutoPingStop`), or any `ScopeLifecycle` stop event
-  (disconnect in both flows, an Offline Mode switch in either direction, a zone transfer, the
-  gate closing under a live session, and dispose), all of which now stop the timer inside
-  `ScopeLifecycle.onEvent` itself, and `onGateChanged` stops it even with no scope request
-  currently running (a gate closing between sweeps must not leave the timer ticking on into a
-  session that can no longer ask anything).
+  a dumb repeating scheduler with no memory of the gate itself; every tick re-checks
+  `scopePeriodicRefreshShouldRun` (scope discovery active, Passive or Hybrid still the mode
+  running, a known zone), the same three facts the mode-start check reads, so a tick that lands
+  after some OTHER path changed one of them without going through the timer's own stop still
+  does nothing rather than refresh for a mode or a gate state that no longer holds.
+
+  It stops on whichever ends first: the mode itself stopping (`AppStateProvider._finishAutoPingStop`,
+  the mode-switch teardown inside `toggleAutoPing`'s start branch since switching between two
+  running modes never passes through `_finishAutoPingStop`, and `_startZoneGracePeriod`'s own
+  ad hoc disable, which bypasses the normal stop the same way), or any `ScopeLifecycle` stop
+  event (disconnect in both flows, an Offline Mode switch in either direction, a zone transfer,
+  the gate closing under a live session, and dispose), all of which stop the timer inside
+  `ScopeLifecycle.onEvent` itself; `onGateChanged` stops it even with no scope request currently
+  running (a gate closing between sweeps must not leave the timer ticking on into a session that
+  can no longer ask anything).
+
+  **Reopening the gate re-arms it.** A gate that closes and reopens while Passive or Hybrid never
+  stopped (a live `/auth` answer withdrawing and then restoring `scope_discovery`, or the user
+  flipping their own switch back on) must not leave the refresh stopped for the rest of the
+  session: `onGateChanged` takes `passiveOrHybridRunning` and a `startRepeaterRefresh` callback
+  (`AppStateProvider._startScopeRepeaterRefreshForRunningMode`, the exact mode-start sequence,
+  5-minute stale check included) and calls it when the gate is open again, the mode is still
+  running, and nothing is already scheduled; already running, or the mode not running at all, is
+  a no-op, so an unrelated preference change does not keep rescheduling it. The three paths that
+  RESTORE a stopped mode (auto-reconnect success, zone-grace re-entry, a completed zone transfer)
+  all resume it through `toggleAutoPing`, so they already re-arm through the ordinary mode-start
+  hook and need no separate wiring here. The Offline Mode hot switch back to online is the one
+  path that does not resume any auto-ping mode at all today, by design (the user restarts it),
+  so there is nothing for this gate to re-arm on that path.
 
 - **Why requests run one at a time, and why pings may run alongside them**: the companion keeps
   one pending request outstanding, the same reason Repeater Administrators' own commands never

@@ -209,6 +209,45 @@ void main() {
     });
   });
 
+  group('whether a periodic refresh tick should run', () {
+    test('active, mode running, known zone: runs', () {
+      expect(
+          scopePeriodicRefreshShouldRun(
+              active: true, passiveOrHybridRunning: true, zone: 'YOW'),
+          isTrue);
+    });
+
+    test('the mode is off: does nothing, even though scope discovery is '
+        'active', () {
+      expect(
+          scopePeriodicRefreshShouldRun(
+              active: true, passiveOrHybridRunning: false, zone: 'YOW'),
+          isFalse);
+    });
+
+    test('scope discovery inactive: does nothing, even with the mode '
+        'running', () {
+      expect(
+          scopePeriodicRefreshShouldRun(
+              active: false, passiveOrHybridRunning: true, zone: 'YOW'),
+          isFalse);
+    });
+
+    test('no zone: does nothing', () {
+      expect(
+          scopePeriodicRefreshShouldRun(
+              active: true, passiveOrHybridRunning: true, zone: null),
+          isFalse);
+    });
+
+    test('an empty zone string: does nothing', () {
+      expect(
+          scopePeriodicRefreshShouldRun(
+              active: true, passiveOrHybridRunning: true, zone: ''),
+          isFalse);
+    });
+  });
+
   test('stored JSON decodes from a string or a map, junk reads null', () {
     expect(decodeScopeJsonMap('{"a":1}'), {'a': 1});
     expect(decodeScopeJsonMap({'a': 1}), {'a': 1});

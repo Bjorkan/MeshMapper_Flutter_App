@@ -429,6 +429,11 @@ class ScopeRunner {
       _log(c, key, ScopeLogOutcome.malformed, at: receivedAt);
       return;
     }
+    // It parsed: the repeater proved it is reachable right now, whatever
+    // happens to the upload below. Clearing the hold here, not only once
+    // persistence succeeds, means a failed save never leaves the miss count
+    // in place for the next ask to double from.
+    _cache.clearHold(key);
     final deviceKey = _deviceKey();
     if (!_budget.tryConsume(deviceKey, receivedSec)) {
       debugLog('[SCOPES] $label: answered [${names.join(', ')}], withheld '

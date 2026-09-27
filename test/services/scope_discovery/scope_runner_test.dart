@@ -767,6 +767,25 @@ void main() {
       });
     });
 
+    test('a malformed answer never parsed OK: it does NOT clear an existing '
+        'hold', () {
+      _run((async, h) {
+        h.cache.recordNoAnswer(_key(0x11), h.nowSec());
+        final heldBefore = h.cache.heldUntil(_key(0x11))!;
+        // Wait out the hold so the repeater is due again for this ask;
+        // otherwise it would never be chosen at all, malformed or not.
+        async.elapse(Duration(seconds: heldBefore - h.nowSec()));
+        h.radio.scripts[_key(0x11)] = const _Script(
+            answerAfter: Duration(milliseconds: 300), body: [1, 2]);
+        _start(async, h.build(token: ScopeCancelToken()), [_cand(0x11)]);
+        async.elapse(const Duration(seconds: 10));
+        expect(h.logged.single.outcome, ScopeLogOutcome.malformed);
+        expect(h.cache.heldUntil(_key(0x11)), heldBefore,
+            reason: 'malformed never parsed, so the (now expired) hold is '
+                'left exactly as it was');
+      });
+    });
+
     test('flood and radio error are logged and the next repeater is asked', () {
       _run((async, h) {
         h.radio.scripts[_key(0x11)] = const _Script(inLease: ScopeFlooded());
@@ -876,6 +895,26 @@ void main() {
       });
     });
 
+    test('full on arrival: withheld, but the parsed answer still clears an '
+        'existing hold', () {
+      _run((async, h) {
+        h.cache.recordNoAnswer(_key(0x11), h.nowSec());
+        final heldUntil = h.cache.heldUntil(_key(0x11))!;
+        // Wait out the hold so the repeater is due again for this ask.
+        async.elapse(Duration(seconds: heldUntil - h.nowSec()));
+        h.radio.scripts[_key(0x11)] = _Script.answers('Ottawa');
+        _start(async, h.build(token: ScopeCancelToken()), [_cand(0x11)]);
+        async.elapse(const Duration(milliseconds: 200));
+        for (var i = 0; i < ScopeHourlyBudget.perHour; i++) {
+          h.budget.tryConsume('DEVICEKEY', h.nowSec());
+        }
+        async.elapse(const Duration(seconds: 10));
+        expect(h.logged.single.outcome, ScopeLogOutcome.withheldHourlyCap);
+        expect(h.cache.heldUntil(_key(0x11)), isNull,
+            reason: 'it answered and parsed OK, whatever the hourly cap did');
+      });
+    });
+
     test('a failed reservation write drops the answer, not stamped', () {
       _run((async, h) {
         h.budgetSaveFails = true;
@@ -885,6 +924,25 @@ void main() {
         expect(h.enqueued, isEmpty);
         expect(h.cache[_key(0x11)], isNull);
         expect(h.cache.pendingPersist, isEmpty);
+      });
+    });
+
+    test('a failed reservation write drops the answer, but still clears an '
+        'existing hold (the repeater proved it is reachable)', () {
+      _run((async, h) {
+        h.cache.recordNoAnswer(_key(0x11), h.nowSec());
+        final heldUntil = h.cache.heldUntil(_key(0x11))!;
+        // Wait out the hold so the repeater is due again for this ask.
+        async.elapse(Duration(seconds: heldUntil - h.nowSec()));
+        h.budgetSaveFails = true;
+        h.radio.scripts[_key(0x11)] = _Script.answers('Ottawa');
+        _start(async, h.build(token: ScopeCancelToken()), [_cand(0x11)]);
+        async.elapse(const Duration(seconds: 10));
+        expect(h.enqueued, isEmpty);
+        expect(h.cache[_key(0x11)], isNull,
+            reason: 'the durable answer stamp still needs persistence');
+        expect(h.cache.heldUntil(_key(0x11)), isNull,
+            reason: 'a failed save must not leave the miss count in place');
       });
     });
 
@@ -917,6 +975,23 @@ void main() {
         expect(h.cache[_key(0x11)], isNull);
         expect(h.cacheSaves, 0);
         expect(h.cache.pendingPersist, isEmpty);
+      });
+    });
+
+    test('enqueue false: still clears an existing hold', () {
+      _run((async, h) {
+        h.cache.recordNoAnswer(_key(0x11), h.nowSec());
+        final heldUntil = h.cache.heldUntil(_key(0x11))!;
+        // Wait out the hold so the repeater is due again for this ask.
+        async.elapse(Duration(seconds: heldUntil - h.nowSec()));
+        h.enqueueOverride = (_, __) async => false;
+        h.radio.scripts[_key(0x11)] = _Script.answers('Ottawa');
+        _start(async, h.build(token: ScopeCancelToken()), [_cand(0x11)]);
+        async.elapse(const Duration(seconds: 10));
+        expect(h.cache[_key(0x11)], isNull);
+        expect(h.cache.heldUntil(_key(0x11)), isNull,
+            reason: 'a refused enqueue must not leave the miss count '
+                'in place');
       });
     });
 
