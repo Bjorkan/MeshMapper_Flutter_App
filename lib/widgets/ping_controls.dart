@@ -311,7 +311,7 @@ class PingControls extends StatelessWidget {
                   // Manual pings use 15-second cooldown, no distance requirement
                   // When Active/Passive Mode is running, just shows "Send Ping" (disabled)
                   Expanded(
-                    child: _ActionButton(
+                    child: PingActionButton(
                       icon: Icons.cell_tower,
                       label: portraitSendPingLabel(status, rf),
                       color: const Color(0xFF0EA5E9), // sky-500
@@ -356,7 +356,7 @@ class PingControls extends StatelessWidget {
                   // When OFF after being ON: shows "Cooldown Xs" like other buttons
                   // During manual ping: shows "Cooldown Xs" (disabled)
                   Expanded(
-                    child: _ActionButton(
+                    child: PingActionButton(
                       icon:
                           hybridEnabled ? Icons.compare_arrows : Icons.sensors,
                       label: portraitActiveModeLabel(status, rf),
@@ -406,7 +406,7 @@ class PingControls extends StatelessWidget {
                 // Disabled during manual ping countdown phases, shows "Cooldown Xs"
                 // When Active/Hybrid Mode is running, just shows "Passive Mode" (disabled, no countdown)
                 Expanded(
-                  child: _ActionButton(
+                  child: PingActionButton(
                     icon: Icons.hearing,
                     label: portraitPassiveModeLabel(status, rf),
                     color: passiveStopping
@@ -506,8 +506,10 @@ class PingControls extends StatelessWidget {
   }
 }
 
-/// Icon-based action button with animated active state
-class _ActionButton extends StatefulWidget {
+/// Icon-based action button with animated active state (portrait layout).
+/// Public only so widget tests can render the real button.
+@visibleForTesting
+class PingActionButton extends StatefulWidget {
   final IconData icon;
   final String label;
   final Color color;
@@ -519,7 +521,8 @@ class _ActionButton extends StatefulWidget {
   final Color? subtitleColor; // Optional subtitle color
   final bool showScopesBadge; // Show "Scopes" badge while requesting
 
-  const _ActionButton({
+  const PingActionButton({
+    super.key,
     required this.icon,
     required this.label,
     required this.color,
@@ -533,10 +536,10 @@ class _ActionButton extends StatefulWidget {
   });
 
   @override
-  State<_ActionButton> createState() => _ActionButtonState();
+  State<PingActionButton> createState() => _PingActionButtonState();
 }
 
-class _ActionButtonState extends State<_ActionButton> {
+class _PingActionButtonState extends State<PingActionButton> {
   @override
   Widget build(BuildContext context) {
     final colorScheme = Theme.of(context).colorScheme;
@@ -1256,7 +1259,7 @@ class _CompactPingControlsState extends State<CompactPingControls> {
             (!hasTargetRepeaterId || !traceModeShowColor);
 
         // Build the buttons
-        final sendPingButton = _CompactActionButton(
+        final sendPingButton = CompactPingActionButton(
           icon: Icons.cell_tower,
           label: compactSendPingLabel(status, rf, showFullText: sendPingExpanded),
           color: const Color(0xFF0EA5E9), // sky-500
@@ -1275,7 +1278,7 @@ class _CompactPingControlsState extends State<CompactPingControls> {
           onPressed: () => _sendPing(context, appState),
         );
 
-        final activeModeButton = _CompactActionButton(
+        final activeModeButton = CompactPingActionButton(
           icon: hybridEnabled ? Icons.compare_arrows : Icons.sensors,
           label: compactActiveModeLabel(status, rf,
               showFullText: activeModeExpanded,
@@ -1306,7 +1309,7 @@ class _CompactPingControlsState extends State<CompactPingControls> {
               : _toggleTxRxAuto(context, appState),
         );
 
-        final passiveModeButton = _CompactActionButton(
+        final passiveModeButton = CompactPingActionButton(
           icon: Icons.hearing,
           label: compactPassiveModeLabel(status, rf,
               showFullText: passiveModeExpanded,
@@ -1342,7 +1345,7 @@ class _CompactPingControlsState extends State<CompactPingControls> {
         );
 
         // Build trace mode button (only used when hasTargetRepeaterId)
-        final traceModeButton = _CompactActionButton(
+        final traceModeButton = CompactPingActionButton(
           icon: Icons.route,
           label: compactTraceModeLabel(status, rf,
               showFullText: traceModeExpanded,
@@ -1531,7 +1534,7 @@ class LandscapePingControls extends StatelessWidget {
                 if (!txNotAllowed && floodTrafficVisible) ...[
                   // TX Ping button
                   Expanded(
-                    child: _LandscapeIconButton(
+                    child: LandscapePingIconButton(
                       icon: Icons.cell_tower,
                       tooltip: txNotAllowed
                           ? 'Passive only (zone full)'
@@ -1563,7 +1566,7 @@ class LandscapePingControls extends StatelessWidget {
 
                   // Active/Hybrid Mode button
                   Expanded(
-                    child: _LandscapeIconButton(
+                    child: LandscapePingIconButton(
                       icon:
                           hybridEnabled ? Icons.compare_arrows : Icons.sensors,
                       tooltip: txNotAllowed
@@ -1602,7 +1605,7 @@ class LandscapePingControls extends StatelessWidget {
 
                 // Passive Mode button
                 Expanded(
-                  child: _LandscapeIconButton(
+                  child: LandscapePingIconButton(
                     icon: Icons.hearing,
                     tooltip: 'Passive Mode',
                     color: passiveStopping
@@ -1820,8 +1823,10 @@ class _LandscapeAntennaSelector extends StatelessWidget {
   }
 }
 
-/// Icon-only action button for landscape panel
-class _LandscapeIconButton extends StatefulWidget {
+/// Icon-only action button for landscape panel.
+/// Public only so widget tests can render the real button.
+@visibleForTesting
+class LandscapePingIconButton extends StatefulWidget {
   final IconData icon;
   final String tooltip;
   final Color color;
@@ -1835,7 +1840,8 @@ class _LandscapeIconButton extends StatefulWidget {
   final VoidCallback onPressed;
   final bool showScopesBadge; // Show "Scopes" badge while requesting
 
-  const _LandscapeIconButton({
+  const LandscapePingIconButton({
+    super.key,
     required this.icon,
     required this.tooltip,
     required this.color,
@@ -1848,22 +1854,22 @@ class _LandscapeIconButton extends StatefulWidget {
   });
 
   @override
-  State<_LandscapeIconButton> createState() => _LandscapeIconButtonState();
+  State<LandscapePingIconButton> createState() => _LandscapePingIconButtonState();
 }
 
-class _LandscapeIconButtonState extends State<_LandscapeIconButton> {
+class _LandscapePingIconButtonState extends State<LandscapePingIconButton> {
   @override
   Widget build(BuildContext context) {
     final colorScheme = Theme.of(context).colorScheme;
     // Keep the button's color (not grey) whenever the countdown badge is shown,
-    // mirroring portrait's `_ActionButton` showCooldown handling. Otherwise the
+    // mirroring portrait's `PingActionButton` showCooldown handling. Otherwise the
     // badge renders white text on grey (onSurfaceVariant) during cooldown.
     final showColor =
         widget.enabled || widget.isActive || widget.countdown != null;
     final effectiveColor =
         showColor ? widget.color : colorScheme.onSurfaceVariant;
     // Static active-state opacity (continuous pulse animation removed — see
-    // _ActionButton; it kept the GPU rendering all session).
+    // PingActionButton; it kept the GPU rendering all session).
     final bgOpacity = widget.isActive ? 0.25 : 0.10;
 
     final button = Tooltip(
@@ -1965,8 +1971,10 @@ class _LandscapeIconButtonState extends State<_LandscapeIconButton> {
 
 /// Compact toggle button for landscape panel
 /// Compact action button for minimized panel - horizontal pill layout
-/// Supports expanding to show label when active
-class _CompactActionButton extends StatefulWidget {
+/// Supports expanding to show label when active.
+/// Public only so widget tests can render the real button.
+@visibleForTesting
+class CompactPingActionButton extends StatefulWidget {
   final IconData icon;
   final String? label; // Label text (shown when expanded)
   final Color color;
@@ -1978,7 +1986,8 @@ class _CompactActionButton extends StatefulWidget {
       progress; // 0.0 to 1.0 for progress bar fill, null = no progress bar
   final bool showScopesBadge; // Show "Scopes" badge while requesting
 
-  const _CompactActionButton({
+  const CompactPingActionButton({
+    super.key,
     required this.icon,
     this.label,
     required this.color,
@@ -1991,10 +2000,10 @@ class _CompactActionButton extends StatefulWidget {
   });
 
   @override
-  State<_CompactActionButton> createState() => _CompactActionButtonState();
+  State<CompactPingActionButton> createState() => _CompactPingActionButtonState();
 }
 
-class _CompactActionButtonState extends State<_CompactActionButton> {
+class _CompactPingActionButtonState extends State<CompactPingActionButton> {
   @override
   Widget build(BuildContext context) {
     final colorScheme = Theme.of(context).colorScheme;
@@ -2004,7 +2013,7 @@ class _CompactActionButtonState extends State<_CompactActionButton> {
     // Show label if colored OR if expanded (shows countdown on grey button during cooldown)
     final hasLabel = widget.label != null && (showColor || widget.isExpanded);
     // Static active-state opacity (continuous pulse animation removed — see
-    // _ActionButton; it kept the GPU rendering all session).
+    // PingActionButton; it kept the GPU rendering all session).
     final bgOpacity = widget.isActive ? 0.25 : 0.12;
 
     final button = Material(

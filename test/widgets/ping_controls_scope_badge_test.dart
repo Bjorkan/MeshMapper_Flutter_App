@@ -8,25 +8,12 @@ import 'package:mesh_mapper/widgets/ping_controls.dart';
 /// its scopes ([AppStateProvider.isScopeRequestActive]).
 ///
 /// `PingControls`, `CompactPingControls` and `LandscapePingControls` all read
-/// a live `AppStateProvider`, whose constructor wires BLE, GPS, Hive and
-/// several platform-channel services immediately (`_initialize()`), so none
-/// of the three can be built here without a large fake-service harness that
-/// does not exist anywhere else in this suite either (no test in the repo
-/// constructs `AppStateProvider`). The three button widgets that actually
-/// render the badge (`_ActionButton`, `_CompactActionButton`,
-/// `_LandscapeIconButton`) are private to `ping_controls.dart`, so this file
-/// cannot reach them directly.
-///
-/// So this suite tests the pieces the fix was pulled into instead:
-/// [showsScopesBadge], the one pure per-mode visibility decision every one of
-/// the three layouts' six Hybrid/Passive button call sites routes through,
-/// and [scopesBadgeSemanticsLabel] (built on [scopesBadgeSemanticsSuffix]),
-/// the one pure label composer every one of the three layouts uses to build
-/// its Semantics label. [ScopesBadge], the shared pill widget all three
-/// layouts render, is pumped directly to confirm its text and color.
-/// Exercising these shared, layout-independent functions once covers what
-/// every layout does with them; the "layout coverage" group below repeats the
-/// same assertions labelled per layout to make that explicit.
+/// a live `AppStateProvider`, which no test in this suite can build, so the
+/// rendered tests below pump the exact button widgets those three layouts use
+/// ([PingActionButton] for portrait, [LandscapePingIconButton] for
+/// landscape, [CompactPingActionButton] for compact), each fed by
+/// [showsScopesBadge] for its mode, the same decision every layout's call
+/// site routes through.
 void main() {
   group('showsScopesBadge', () {
     test('Passive: shows while running and a scope request is active', () {
@@ -147,77 +134,215 @@ void main() {
     });
   });
 
-  group('layout coverage (portrait, landscape, compact)', () {
-    // PingControls, CompactPingControls and LandscapePingControls each read a
-    // live AppStateProvider (see the file doc comment for why none can be
-    // built here), so this group cannot pump the real portrait/landscape/
-    // compact button trees. ping_controls.dart wires all six of their
-    // Hybrid/Passive button call sites through showsScopesBadge and every
-    // badge's semantics through scopesBadgeSemanticsLabel (verified by source
-    // reading in the accompanying fix report), so the groups below stand in
-    // for "portrait", "landscape" and "compact" by re-running the shared,
-    // layout-independent decision the source wires identically in all three.
-    for (final layout in ['portrait', 'landscape', 'compact']) {
-      test('$layout: Passive shows only while running and active', () {
-        expect(
-          showsScopesBadge(AutoMode.passive,
-              isModeRunning: true, isScopeRequestActive: true),
-          isTrue,
-          reason: '$layout Passive button',
-        );
-        expect(
-          showsScopesBadge(AutoMode.passive,
-              isModeRunning: true, isScopeRequestActive: false),
-          isFalse,
-          reason: '$layout Passive button, request ended',
-        );
-      });
+  group('rendered buttons (portrait, landscape, compact)', () {
+    for (final layout in _Layout.values) {
+      group(layout.name, () {
+        for (final mode in [AutoMode.passive, AutoMode.hybrid]) {
+          testWidgets('${mode.name}: the pill shows while asking, not after',
+              (tester) async {
+            await _pump(tester, layout, mode, requestActive: true);
+            expect(_badgeIn(layout), findsOneWidget);
+            expect(
+              find.descendant(
+                  of: find.byType(layout.buttonType),
+                  matching: find.text('Scopes')),
+              findsOneWidget,
+            );
 
-      test('$layout: Hybrid shows only while running and active', () {
-        expect(
-          showsScopesBadge(AutoMode.hybrid,
-              isModeRunning: true, isScopeRequestActive: true),
-          isTrue,
-          reason: '$layout Hybrid button',
-        );
-        expect(
-          showsScopesBadge(AutoMode.hybrid,
-              isModeRunning: true, isScopeRequestActive: false),
-          isFalse,
-          reason: '$layout Hybrid button, request ended',
-        );
-      });
+            await _pump(tester, layout, mode, requestActive: false);
+            expect(_badgeIn(layout), findsNothing);
+            expect(find.text('Scopes'), findsNothing);
+          });
 
-      test('$layout: Active and Trace never show it', () {
-        for (final mode in [AutoMode.active, AutoMode.targeted]) {
-          expect(
-            showsScopesBadge(mode,
-                isModeRunning: true, isScopeRequestActive: true),
-            isFalse,
-            reason: '$layout ${mode.name} button',
-          );
+          testWidgets('${mode.name}: label and countdown text are unchanged',
+              (tester) async {
+            await _pump(tester, layout, mode, requestActive: false);
+            final off = _buttonTexts(tester, layout);
+            await _pump(tester, layout, mode, requestActive: true);
+            final on = _buttonTexts(tester, layout);
+            expect(off, isNotEmpty);
+            expect(on, off);
+          });
+
+          testWidgets('${mode.name}: semantics carry the phrase only while on',
+              (tester) async {
+            final handle = tester.ensureSemantics();
+            final phrase = RegExp(RegExp.escape(scopesBadgeSemanticsSuffix));
+
+            await _pump(tester, layout, mode, requestActive: true);
+            final node = tester.getSemantics(find.bySemanticsLabel(phrase));
+            expect(
+              node.label,
+              contains('${layout.baseLabel(mode)}$scopesBadgeSemanticsSuffix'),
+            );
+
+            await _pump(tester, layout, mode, requestActive: false);
+            expect(find.bySemanticsLabel(phrase), findsNothing);
+            // The button still announces its own label, first.
+            expect(
+              find.bySemanticsLabel(
+                  RegExp('^${RegExp.escape(layout.baseLabel(mode))}')),
+              findsWidgets,
+            );
+            handle.dispose();
+          });
+
+          testWidgets('${mode.name}: the overhanging pill is not clipped',
+              (tester) async {
+            await _pump(tester, layout, mode, requestActive: true);
+            final badge = _badgeIn(layout);
+
+            // Every Stack between the pill and the button lets it overhang.
+            final stacks = find.ancestor(
+                of: badge,
+                matching: find.descendant(
+                    of: find.byType(layout.buttonType),
+                    matching: find.byType(Stack)));
+            expect(stacks, findsWidgets);
+            for (final stack in tester.widgetList<Stack>(stacks)) {
+              expect(stack.clipBehavior, Clip.none);
+            }
+            // And no clip widget sits between them either.
+            for (final clip in [ClipRect, ClipRRect, ClipPath, ClipOval]) {
+              expect(
+                find.ancestor(
+                    of: badge,
+                    matching: find.descendant(
+                        of: find.byType(layout.buttonType),
+                        matching: find.byType(clip))),
+                findsNothing,
+              );
+            }
+
+            // The pill really does sit past its Stack's edge, so a clip on
+            // that Stack would cut it.
+            final stackRect = tester.getRect(stacks.first);
+            final badgeRect = tester.getRect(badge);
+            expect(stackRect.intersect(badgeRect), isNot(badgeRect));
+          });
         }
-      });
 
-      test('$layout: label/countdown text is identical with or without it',
-          () {
-        const baseLabel = 'Next disc 12s';
-        expect(scopesBadgeSemanticsLabel(baseLabel, false), baseLabel,
-            reason: '$layout, badge hidden');
-        expect(
-          scopesBadgeSemanticsLabel(baseLabel, true).startsWith(baseLabel),
-          isTrue,
-          reason: '$layout base label must not be altered by the suffix',
-        );
-      });
-
-      test('$layout: semantics phrase is present while active', () {
-        expect(
-          scopesBadgeSemanticsLabel('Passive Mode', true),
-          contains(scopesBadgeSemanticsSuffix),
-          reason: layout,
-        );
+        for (final mode in [AutoMode.active, AutoMode.targeted]) {
+          testWidgets('${mode.name}: never shows the pill', (tester) async {
+            final handle = tester.ensureSemantics();
+            await _pump(tester, layout, mode, requestActive: true);
+            expect(_badgeIn(layout), findsNothing);
+            expect(find.text('Scopes'), findsNothing);
+            expect(
+              find.bySemanticsLabel(
+                  RegExp(RegExp.escape(scopesBadgeSemanticsSuffix))),
+              findsNothing,
+            );
+            handle.dispose();
+          });
+        }
       });
     }
   });
+}
+
+/// The three layouts and the button widget each one renders.
+enum _Layout {
+  portrait(PingActionButton),
+  landscape(LandscapePingIconButton),
+  compact(CompactPingActionButton);
+
+  const _Layout(this.buttonType);
+
+  final Type buttonType;
+
+  /// The button's own text: the running label in portrait and compact, the
+  /// tooltip in landscape (whose countdown rides a separate number badge).
+  String baseLabel(AutoMode mode) => switch (this) {
+        _Layout.landscape => '${_modeName(mode)} Mode',
+        _ => 'Next ping 12s',
+      };
+}
+
+String _modeName(AutoMode mode) => switch (mode) {
+      AutoMode.active => 'Active',
+      AutoMode.hybrid => 'Hybrid',
+      AutoMode.passive => 'Passive',
+      AutoMode.targeted => 'Trace',
+    };
+
+IconData _iconFor(AutoMode mode) => switch (mode) {
+      AutoMode.active => Icons.sensors,
+      AutoMode.hybrid => Icons.compare_arrows,
+      AutoMode.passive => Icons.hearing,
+      AutoMode.targeted => Icons.route,
+    };
+
+/// Pumps [layout]'s real button for a running [mode], with the badge decided
+/// by [showsScopesBadge] exactly as the layouts' call sites decide it.
+Future<void> _pump(
+  WidgetTester tester,
+  _Layout layout,
+  AutoMode mode, {
+  required bool requestActive,
+}) async {
+  final badge = showsScopesBadge(mode,
+      isModeRunning: true, isScopeRequestActive: requestActive);
+  const color = Color(0xFF22C55E);
+  final label = layout.baseLabel(mode);
+  final Widget button = switch (layout) {
+    _Layout.portrait => PingActionButton(
+        icon: _iconFor(mode),
+        label: label,
+        color: color,
+        enabled: true,
+        isActive: true,
+        onPressed: () {},
+        showScopesBadge: badge,
+      ),
+    _Layout.landscape => LandscapePingIconButton(
+        icon: _iconFor(mode),
+        tooltip: label,
+        color: color,
+        enabled: true,
+        isActive: true,
+        countdown: 12,
+        onPressed: () {},
+        showScopesBadge: badge,
+      ),
+    _Layout.compact => CompactPingActionButton(
+        icon: _iconFor(mode),
+        label: label,
+        color: color,
+        enabled: true,
+        isActive: true,
+        isExpanded: true,
+        progress: 0.5,
+        onPressed: () {},
+        showScopesBadge: badge,
+      ),
+  };
+  await tester.pumpWidget(MaterialApp(
+    home: Scaffold(
+      body: Center(
+        child: Padding(
+          padding: const EdgeInsets.all(24),
+          child: SizedBox(width: 160, child: button),
+        ),
+      ),
+    ),
+  ));
+  await tester.pumpAndSettle();
+}
+
+Finder _badgeIn(_Layout layout) => find.descendant(
+    of: find.byType(layout.buttonType), matching: find.byType(ScopesBadge));
+
+/// Every Text the button renders, minus the pill's own.
+List<String?> _buttonTexts(WidgetTester tester, _Layout layout) {
+  final pillTexts = tester
+      .widgetList<Text>(find.descendant(
+          of: find.byType(ScopesBadge), matching: find.byType(Text)))
+      .toSet();
+  return tester
+      .widgetList<Text>(find.descendant(
+          of: find.byType(layout.buttonType), matching: find.byType(Text)))
+      .where((t) => !pillTexts.contains(t))
+      .map((t) => t.data)
+      .toList();
 }
