@@ -420,10 +420,13 @@ landed in the queue. The discovery countdown is the one timer the user stop path
 and the hot switch stops, because a discovery window still open belongs to the session being
 torn down.
 
-Scope discovery (see below) rides Passive and Hybrid's own discovery results and works
-alongside them without changing anything about their schedule: it never moves a discovery or a
-TX interval, and a scope request in progress never delays the next scheduled ping. It has
-nothing to do with Active or Trace mode, neither of which runs a discovery.
+Scope discovery (see below) rides Passive and Hybrid's own discovery results and never changes
+either mode's own schedule: no ping is ever skipped or rescheduled because of it, and the timer
+that decides when the next TX or discovery is due keeps running untouched. What CAN happen is a
+delay at the write itself: a TX, discovery, trace send, or a banked-ping release that is written
+while the short radio lease (see below) is held waits at the lease's own write gate until it
+releases, normally a few hundred milliseconds and at most about 4 seconds. It has nothing to do
+with Active or Trace mode in practice, since only Passive and Hybrid ever hold that lease.
 
 ### GPS & Zone Validation
 
@@ -604,17 +607,22 @@ untouched. On by default with a 14 day window.
 After a discovery sweep finds repeaters, the app can ask up to 3 of the strongest ones which
 scopes (the channels or contacts a repeater passes) they carry, and upload each answer as its
 own `SCOPES` item. It never runs on its own: it only follows a discovery that a Passive or
-Hybrid session already made, and it never delays, replaces, or is delayed by, a TX or discovery
-ping. Off by default until a region turns it on.
+Hybrid session already made, and it never changes when a TX or discovery ping is due, or
+replaces one. A ping, trace send or banked-ping release that is written while the short radio
+lease is held does wait for it to release first, normally a few hundred milliseconds and at
+most about 4 seconds (see the short radio lease below); the schedule itself is never touched.
+Off by default until a region turns it on.
 
 - **The gate**: `/auth` carries `scope_discovery` (bool) and `scope_refresh_days` (int) on every
   live and offline-mode auth. **Server first is built into the gate itself**: an old server
   that never adds the key is read as key absent, and the app then never asks and never uploads
   a `SCOPES` item, whatever the user's own switch says, with no separate version check needed
   anywhere else. Key present with `true` (or `1`) locks the user's switch on and enforces the
-  server's own interval (floored at 7 days, no ceiling); any other value leaves the user's own
-  switch and interval in force (default off, 14 days, minimum 7, clamped rather than falling
-  back to the default the way Smart Ping's interval does). `AppStateProvider.scopeDiscoveryActive`
+  server's own interval regardless of the user's own setting: `scope_refresh_days` missing or
+  non-numeric reads as 14 days, and any numeric value below 7 reads as 7 (floored at 7, no
+  ceiling otherwise). Key present with anything else leaves the user's own switch and interval
+  in force (default off, 14 days, minimum 7, clamped rather than falling back to the default the
+  way Smart Ping's interval does). `AppStateProvider.scopeDiscoveryActive`
   (`scopeDiscoveryGateOpen` in `lib/services/scope_discovery/scope_lifecycle.dart`) is the one
   predicate every send site reads: offered, (enforced OR the user switch), never in Offline
   Mode, and the connected companion's firmware at or above the floor below. Settings (Settings
@@ -688,10 +696,15 @@ ping. Off by default until a region turns it on.
 
 - **Choosing repeaters and the distance gate**: strongest local RSSI first, local SNR to break
   a tie, then the repeater's key for a stable order past that; at most 3 per sweep
-  (`ScopeRunner.maxAsksPerSweep`). A repeater whose discovery reply put it more than 300 m from
-  the phone's current position is skipped (a car that has already moved on should not spend
-  airtime re-asking a repeater it left behind); a phone with no current fix skips the gate
-  rather than block on it.
+  (`ScopeRunner.maxAsksPerSweep`). The gate measures how far the PHONE has moved (straight
+  line, against its latest fix) from the discovery position, never the distance to the
+  repeater itself: the app has no other fix on where a repeater actually is, only where the
+  phone stood when it heard it. Moving more than 300 m from that point ends the rest of the
+  sweep outright (`scope_runner.dart`, `_mayAsk`), not just a skip of the one repeater over the
+  line, since a car that has moved on should not spend airtime on any of what it left behind. A
+  phone with no current fix skips the check rather than block on it. A stationary phone can
+  therefore still ask a repeater that is, in reality, well over 300 m away: the gate only ever
+  measures how far the phone itself has travelled.
 
 - **The answer wait**: each repeater's own measured discovery reply time (`DiscTracker`'s
   `discoveryReplyAfter` for THIS sweep's own tag, never a foreign one) plus a 2 second margin
