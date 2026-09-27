@@ -178,6 +178,8 @@ class ScopeRunner {
   final void Function(bool active) _onActiveChanged;
   final void Function(ScopeLogEntry entry) _onLogged;
   final List<ContactRecord> _pendingRestores;
+  final Set<String> _knownNonContacts;
+  final bool Function() _cannotAskNonContacts;
 
   /// Set by the owner (PingService): false once this runner is no longer
   /// the live one, so a late continuation never moves a newer runner's
@@ -216,6 +218,8 @@ class ScopeRunner {
     String? Function()? sessionId,
     int Function()? queueGeneration,
     void Function()? onCacheStamped,
+    Set<String>? knownNonContacts,
+    bool Function()? cannotAskNonContacts,
   })  : _radio = radio,
         _cancel = cancel,
         _hardStop = hardStop,
@@ -233,7 +237,9 @@ class ScopeRunner {
         _stillWanted = stillWanted,
         _onActiveChanged = onActiveChanged,
         _onLogged = onLogged,
-        _pendingRestores = pendingRestores;
+        _pendingRestores = pendingRestores,
+        _knownNonContacts = knownNonContacts ?? <String>{},
+        _cannotAskNonContacts = cannotAskNonContacts ?? (() => false);
 
   /// True once [cancel] ran or the token fired.
   bool get isCancelled => _cancel.isCancelled;
@@ -342,6 +348,11 @@ class ScopeRunner {
   Future<bool> _ask(ScopeCandidate c, DateTime hardStop) async {
     final key = normalizePublicKey(c.keyHex)!;
     final label = _prefix(key);
+    if (_cannotAskNonContacts() && _knownNonContacts.contains(key)) {
+      debugLog('[SCOPES] $label: known non-contact and this connection '
+          'cannot ask non-contacts, skipping without a lease');
+      return true;
+    }
     final wait = _waitFor(c);
     if (!_mayAsk(c)) return false;
     final needed = leaseAdmissionWait + kScopeLeaseHold + wait;
@@ -406,9 +417,14 @@ class ScopeRunner {
         debugLog('[SCOPES] $label: flooded by the radio');
         _log(c, key, ScopeLogOutcome.flooded);
         return !_cancel.isCancelled;
-      case ScopeRadioError(:final code):
+      case ScopeRadioError(:final code, :final nonContactTableFull):
         debugLog('[SCOPES] $label: radio error $code');
-        _log(c, key, ScopeLogOutcome.radioError);
+        if (nonContactTableFull) {
+          _knownNonContacts.add(key);
+          _log(c, key, ScopeLogOutcome.radioContactsFull);
+        } else {
+          _log(c, key, ScopeLogOutcome.radioError);
+        }
         return !_cancel.isCancelled;
       case ScopeLocalFailure(:final why):
         _stop('local failure asking $label ($why)');
@@ -416,6 +432,11 @@ class ScopeRunner {
       case ScopeAborted():
         if (!_cancel.isCancelled) _stop('ask to $label aborted');
         return false;
+      case ScopeNonContactRefused():
+        debugLog('[SCOPES] $label: not a contact and this connection cannot '
+            'ask non-contacts, nothing sent');
+        _knownNonContacts.add(key);
+        return !_cancel.isCancelled;
     }
   }
 

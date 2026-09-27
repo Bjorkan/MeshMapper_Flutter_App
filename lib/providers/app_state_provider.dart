@@ -209,6 +209,16 @@ bool scopeDiscoveryFirmwareTooOld(
     connected &&
     (firmwareCode ?? 0) < AppStateProvider.kScopeDiscoveryCompanionVersionCode;
 
+/// Whether the connected radio's contact table is full and this connection
+/// has stopped asking a repeater that is not a saved contact for its scopes
+/// (`MeshCoreConnection.scopeCannotAskNonContacts`). The Settings tile grows
+/// an extra line while this reads true. Not connected means nothing to warn
+/// about yet, whatever the flag last read.
+@visibleForTesting
+bool scopeDiscoveryContactsFull(
+        {required bool connected, required bool flagSet}) =>
+    connected && flagSet;
+
 /// Main application state provider
 class AppStateProvider extends ChangeNotifier with WidgetsBindingObserver {
   // Maximum sizes for in-memory lists to prevent unbounded growth during long sessions
@@ -844,6 +854,17 @@ class AppStateProvider extends ChangeNotifier with WidgetsBindingObserver {
   /// plain notify: the map does not render it (Rule 9).
   void _wireScopeRadioBusy(MeshCoreConnection connection) {
     connection.onScopeRadioBusyChanged = () {
+      if (_isDisposed || !identical(_meshCoreConnection, connection)) return;
+      notifyListeners();
+    };
+  }
+
+  /// Rebuilds the Scope Discovery settings tile when [connection]'s
+  /// "cannot ask non-contacts" flag flips. Fired once, only on the
+  /// transition, so this is a plain notify: the map does not render it
+  /// (Rule 9).
+  void _wireScopeCannotAskNonContacts(MeshCoreConnection connection) {
+    connection.onScopeCannotAskNonContactsChanged = () {
       if (_isDisposed || !identical(_meshCoreConnection, connection)) return;
       notifyListeners();
     };
@@ -1768,6 +1789,18 @@ class AppStateProvider extends ChangeNotifier with WidgetsBindingObserver {
   /// [scopeDiscoveryFirmwareTooOld].
   bool get scopeDiscoveryNeedsNewerFirmware => scopeDiscoveryFirmwareTooOld(
       connected: isConnected, firmwareCode: companionFirmwareVersionCode);
+
+  /// True while the connected companion has stopped asking a repeater that
+  /// is not a saved contact for its scopes (its contact table is full).
+  /// Raw, not gated on being connected; see [scopeDiscoveryNeedsContactSlot]
+  /// for the gated form the Settings tile's note reads.
+  bool get scopeCannotAskNonContacts =>
+      _meshCoreConnection?.scopeCannotAskNonContacts ?? false;
+
+  /// Whether the Settings tile's contact-table-full note should show; see
+  /// [scopeDiscoveryContactsFull].
+  bool get scopeDiscoveryNeedsContactSlot => scopeDiscoveryContactsFull(
+      connected: isConnected, flagSet: scopeCannotAskNonContacts);
 
   /// Null means the ordinary all-time overlay. Regional window overrides apply.
   int? get coverageOverlayDays =>
@@ -4324,6 +4357,7 @@ class AppStateProvider extends ChangeNotifier with WidgetsBindingObserver {
         debugLog('[APP] Creating new MeshCoreConnection');
         _meshCoreConnection = MeshCoreConnection(transport: _bluetoothService);
         _wireScopeRadioBusy(_meshCoreConnection!);
+        _wireScopeCannotAskNonContacts(_meshCoreConnection!);
 
         if (!_preferences.offlineMode) {
           _meshCoreConnection!.onRequestAuth = _createAuthCallback();
@@ -4501,6 +4535,7 @@ class AppStateProvider extends ChangeNotifier with WidgetsBindingObserver {
       debugLog('[APP] Creating new MeshCoreConnection (TCP)');
       _meshCoreConnection = MeshCoreConnection(transport: tcpService);
       _wireScopeRadioBusy(_meshCoreConnection!);
+      _wireScopeCannotAskNonContacts(_meshCoreConnection!);
 
       if (!_preferences.offlineMode) {
         _meshCoreConnection!.onRequestAuth = _createAuthCallback();
@@ -4632,6 +4667,7 @@ class AppStateProvider extends ChangeNotifier with WidgetsBindingObserver {
       debugLog('[APP] Creating new MeshCoreConnection (USB Serial)');
       _meshCoreConnection = MeshCoreConnection(transport: serialService);
       _wireScopeRadioBusy(_meshCoreConnection!);
+      _wireScopeCannotAskNonContacts(_meshCoreConnection!);
 
       if (!_preferences.offlineMode) {
         _meshCoreConnection!.onRequestAuth = _createAuthCallback();
@@ -4756,6 +4792,7 @@ class AppStateProvider extends ChangeNotifier with WidgetsBindingObserver {
       debugLog('[APP] Creating new MeshCoreConnection (generic transport)');
       _meshCoreConnection = MeshCoreConnection(transport: transport);
       _wireScopeRadioBusy(_meshCoreConnection!);
+      _wireScopeCannotAskNonContacts(_meshCoreConnection!);
 
       if (!_preferences.offlineMode) {
         _meshCoreConnection!.onRequestAuth = _createAuthCallback();
@@ -10730,7 +10767,7 @@ class AppStateProvider extends ChangeNotifier with WidgetsBindingObserver {
       gate: _scopeGateInputs,
       connection: connection,
       deviceKey: _devicePublicKey ?? _apiService.sessionId,
-      create: (deviceKey, pendingRestores) => ScopeRunner(
+      create: (deviceKey, pendingRestores, knownNonContacts) => ScopeRunner(
         radio: MeshCoreScopeRadio(connection!),
         cancel: cancel,
         hardStop: hardStop,
@@ -10761,6 +10798,8 @@ class AppStateProvider extends ChangeNotifier with WidgetsBindingObserver {
         onActiveChanged: _scopeLifecycle.setRequestActive,
         onLogged: _addScopeLogEntry,
         pendingRestores: pendingRestores,
+        knownNonContacts: knownNonContacts,
+        cannotAskNonContacts: () => connection.scopeCannotAskNonContacts,
       ),
     );
   }

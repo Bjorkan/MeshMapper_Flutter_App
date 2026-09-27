@@ -80,7 +80,24 @@ final class ScopeFlooded extends ScopeRequestOutcome {
 final class ScopeRadioError extends ScopeRequestOutcome {
   final int code;
 
-  const ScopeRadioError(this.code, {super.restoreOwed, super.borrowedFrom});
+  /// True when this was ERR_CODE_TABLE_FULL answering a send to a repeater
+  /// the lookup just found is not a saved contact: the connection-level
+  /// "cannot ask non-contacts" flag was set (or already set) because of
+  /// this ask. False for every other ERR, including the same code answering
+  /// a saved contact.
+  final bool nonContactTableFull;
+
+  const ScopeRadioError(this.code,
+      {this.nonContactTableFull = false,
+      super.restoreOwed,
+      super.borrowedFrom});
+}
+
+/// The repeater was not a saved contact and this connection cannot ask
+/// non-contacts (a send already came back ERR_CODE_TABLE_FULL for one on
+/// this connection). Nothing beyond the lookup was written for this ask.
+final class ScopeNonContactRefused extends ScopeRequestOutcome {
+  const ScopeNonContactRefused();
 }
 
 /// A local stop: `hold_cap` (the lease deadline), `malformed_sent`,
@@ -131,6 +148,17 @@ abstract interface class ScopeLeaseHost {
 
   /// Ends the answer wait: disarms the answer slot and frees the admin slot.
   void endListen();
+
+  /// True once a send to a repeater not among this connection's saved
+  /// contacts came back ERR_CODE_TABLE_FULL (a companion firmware bug: the
+  /// radio needs a contact-table slot for `CMD_SEND_ANON_REQ` and has none
+  /// free, fixed in v1.17.0's 8 reserved transient slots). Sticky for the
+  /// life of the connection.
+  bool get cannotAskNonContacts;
+
+  /// Records that this connection cannot ask a repeater that is not a saved
+  /// contact. Idempotent.
+  void markCannotAskNonContacts();
 }
 
 enum _LeaseEnd { released, holdCap, cancelled, disconnected }
@@ -269,6 +297,13 @@ class ScopeLease implements ScopeLeaseHandle {
       return _localFailure('reply_owed', null);
     }
 
+    if (contact == null && _host.cannotAskNonContacts) {
+      debugLog('[SCOPES] $label is not a contact and this connection cannot '
+          'ask non-contacts (contact table full), skipping the send');
+      _end(_LeaseEnd.released);
+      return const ScopeNonContactRefused();
+    }
+
     // Borrow a zero-hop route unless it already has one.
     ContactRecord? borrowed;
     if (contact != null && !(contact.hasRoute && contact.routeHopCount == 0)) {
@@ -328,7 +363,13 @@ class ScopeLease implements ScopeLeaseHandle {
       debugWarn('[SCOPES] Send to $label answered with code ${sf[0]}'
           '${isErr ? ' (error code $code)' : ''}');
       if (borrowed != null) await _restore(borrowed);
-      if (isErr) return _radioError(code, borrowed);
+      if (isErr) {
+        final nonContactTableFull =
+            contact == null && code == ErrorCodes.tableFull;
+        if (nonContactTableFull) _host.markCannotAskNonContacts();
+        return _radioError(code, borrowed,
+            nonContactTableFull: nonContactTableFull);
+      }
       return _localFailure(
           sf[0] == ResponseCodes.sent ? 'malformed_sent' : 'reply_owed',
           borrowed);
@@ -544,10 +585,13 @@ class ScopeLease implements ScopeLeaseHandle {
         restoreOwed: _owes(borrowed), borrowedFrom: borrowed);
   }
 
-  ScopeRequestOutcome _radioError(int code, ContactRecord? borrowed) {
+  ScopeRequestOutcome _radioError(int code, ContactRecord? borrowed,
+      {bool nonContactTableFull = false}) {
     _end(_LeaseEnd.released);
     return ScopeRadioError(code,
-        restoreOwed: _owes(borrowed), borrowedFrom: borrowed);
+        nonContactTableFull: nonContactTableFull,
+        restoreOwed: _owes(borrowed),
+        borrowedFrom: borrowed);
   }
 
   bool _owes(ContactRecord? borrowed) =>

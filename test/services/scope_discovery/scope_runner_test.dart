@@ -232,6 +232,8 @@ class _Harness {
   bool wanted = true;
   int queueGeneration = 1;
   final List<ContactRecord> pendingRestores = [];
+  final Set<String> knownNonContacts = {};
+  bool cannotAskNonContacts = false;
   int cacheSaves = 0;
 
   int nowSec() => clock.now().millisecondsSinceEpoch ~/ 1000;
@@ -266,6 +268,8 @@ class _Harness {
       onActiveChanged: badge.add,
       onLogged: logged.add,
       pendingRestores: pendingRestores,
+      knownNonContacts: knownNonContacts,
+      cannotAskNonContacts: () => cannotAskNonContacts,
     );
   }
 }
@@ -1193,6 +1197,77 @@ void main() {
         expect(done(), isTrue);
         expect(h.radio.acquires, 0);
         expect(h.badge, isEmpty);
+      });
+    });
+  });
+
+  group('contact table full', () {
+    test('a non-contact table-full radio error is logged distinctly and '
+        'remembered', () {
+      _run((async, h) {
+        h.radio.scripts[_key(0x11)] = const _Script(
+            inLease: ScopeRadioError(3, nonContactTableFull: true));
+        _start(async, h.build(), [_cand(0x11)]);
+        async.elapse(const Duration(seconds: 5));
+        expect(h.logged.single.outcome, ScopeLogOutcome.radioContactsFull);
+      });
+    });
+
+    test('a saved contact\'s table-full radio error is logged as the '
+        'ordinary radio error', () {
+      _run((async, h) {
+        h.radio.scripts[_key(0x11)] =
+            const _Script(inLease: ScopeRadioError(3));
+        _start(async, h.build(), [_cand(0x11)]);
+        async.elapse(const Duration(seconds: 5));
+        expect(h.logged.single.outcome, ScopeLogOutcome.radioError);
+      });
+    });
+
+    test('with the flag set, a known non-contact is skipped with no lease',
+        () {
+      _run((async, h) {
+        h.cannotAskNonContacts = true;
+        h.knownNonContacts.add(_key(0x11));
+        final done = _start(async, h.build(), [_cand(0x11)]);
+        async.elapse(const Duration(seconds: 5));
+        expect(done(), isTrue);
+        expect(h.radio.acquires, 0);
+        expect(h.radio.frames, isEmpty);
+        expect(h.logged, isEmpty);
+      });
+    });
+
+    test('with the flag set, an unknown repeater is still looked up, and a '
+        'refusal is remembered but never logged', () {
+      _run((async, h) {
+        h.cannotAskNonContacts = true;
+        h.radio.scripts[_key(0x11)] =
+            const _Script(inLease: ScopeNonContactRefused());
+        _start(async, h.build(), [_cand(0x11)]);
+        async.elapse(const Duration(seconds: 5));
+        expect(h.radio.acquires, 1, reason: 'the lookup is still taken');
+        expect(h.logged, isEmpty,
+            reason: 'never shown in the log tab, debug log only');
+        expect(h.knownNonContacts, contains(_key(0x11)));
+
+        // The next sweep skips it without a lease.
+        final acquiresBefore = h.radio.acquires;
+        _start(async, h.build(token: ScopeCancelToken()), [_cand(0x11)]);
+        async.elapse(const Duration(seconds: 5));
+        expect(h.radio.acquires, acquiresBefore,
+            reason: 'now known, so no lease this time');
+      });
+    });
+
+    test('the flag alone (no known-non-contact entry) does not block an ask',
+        () {
+      _run((async, h) {
+        h.cannotAskNonContacts = true;
+        h.radio.scripts[_key(0x11)] = _Script.answers('Ottawa');
+        _start(async, h.build(), [_cand(0x11)]);
+        async.elapse(const Duration(seconds: 10));
+        expect(h.enqueued.single.answer.scopes, ['Ottawa']);
       });
     });
   });

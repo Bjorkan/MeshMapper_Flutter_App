@@ -1048,6 +1048,24 @@ void main() {
     });
   });
 
+  group('contact table full', () {
+    test('a new connection object starts with the flag clear', () {
+      onScopeClock(ScopeRadio.new, (async, radio, conn) {
+        ask(async, grant(async, conn)!);
+        radio.emit([ResponseCodes.err, ErrorCodes.notFound]);
+        async.flushMicrotasks();
+        radio.emit([ResponseCodes.err, ErrorCodes.tableFull]);
+        async.flushMicrotasks();
+        expect(conn.scopeCannotAskNonContacts, isTrue);
+      });
+      // A fresh connection object (a reconnect) starts clean, even though
+      // the previous connection's flag was set.
+      onScopeClock(ScopeRadio.new, (async, radio, conn) {
+        expect(conn.scopeCannotAskNonContacts, isFalse);
+      });
+    });
+  });
+
   group('release', () {
     test(
         'a reply owed at release is retired on arrival and dispatched as before',

@@ -651,6 +651,13 @@ class MeshCoreConnection {
   // admitted on this connection object again (a reconnect builds a new one).
   bool _radioRestarting = false;
 
+  // A send to a repeater that is not a saved contact came back
+  // ERR_CODE_TABLE_FULL: the connected companion firmware (a bug fixed in
+  // v1.17.0's 8 reserved transient slots) needs a contact-table slot for
+  // CMD_SEND_ANON_REQ and has none free. Sticky for the life of the
+  // connection; a reconnect builds a new instance and clears it.
+  bool _scopeCannotAskNonContacts = false;
+
   // The live lease, its admin-slot token and the gate every other write
   // waits at while it is held.
   ScopeLease? _lease;
@@ -1493,6 +1500,17 @@ class MeshCoreConnection {
   /// the rest of this connection.
   bool get isScopeDiscoverySuspended =>
       _scopeSuspended || _replySyncLost || _radioRestarting;
+
+  /// True once a send to a repeater that is not a saved contact came back
+  /// ERR_CODE_TABLE_FULL: this connection will not ask a non-contact again
+  /// until reconnected. A saved contact is unaffected and is still asked
+  /// normally.
+  bool get scopeCannotAskNonContacts => _scopeCannotAskNonContacts;
+
+  /// Fired once, synchronously, the moment [scopeCannotAskNonContacts] flips
+  /// from false to true. Wired to a plain provider notify (the Settings
+  /// tile's note), never `mapRevision` (Rule 9).
+  void Function()? onScopeCannotAskNonContactsChanged;
 
   bool get _scopeOwnsSlot {
     final owner = _adminCommandInFlight;
@@ -3487,4 +3505,16 @@ class _ScopeLeaseHostAdapter implements ScopeLeaseHost {
 
   @override
   void endListen() => _c._endScopeListen();
+
+  @override
+  bool get cannotAskNonContacts => _c._scopeCannotAskNonContacts;
+
+  @override
+  void markCannotAskNonContacts() {
+    if (_c._scopeCannotAskNonContacts) return;
+    _c._scopeCannotAskNonContacts = true;
+    debugLog('[SCOPES] Radio contact table full: no more asks to repeaters '
+        'that are not saved contacts on this connection');
+    _c.onScopeCannotAskNonContactsChanged?.call();
+  }
 }

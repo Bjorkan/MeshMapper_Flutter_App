@@ -110,7 +110,7 @@ class _Harness {
       gate: gate ?? _gate(),
       connection: connection ?? this.connection,
       deviceKey: deviceKey,
-      create: (key, restores) => ScopeRunner(
+      create: (key, restores, knownNonContacts) => ScopeRunner(
         radio: radio,
         cancel: token,
         hardStop: clock.now().add(const Duration(seconds: 30)),
@@ -126,6 +126,7 @@ class _Harness {
         onActiveChanged: lifecycle.setRequestActive,
         onLogged: (_) {},
         pendingRestores: restores,
+        knownNonContacts: knownNonContacts,
       ),
     );
   }
@@ -171,7 +172,7 @@ void main() {
               gate: _gate(),
               connection: null,
               deviceKey: 'KEY',
-              create: (_, __) => fail('must not build')),
+              create: (_, __, ___) => fail('must not build')),
           isNull);
       expect(h.build(deviceKey: null), isNull);
     });
@@ -283,6 +284,42 @@ void main() {
       final h = _Harness();
       h.lifecycle.restoresFor(h.connection).add(record());
       expect(h.lifecycle.restoresFor(Object()), isEmpty);
+    });
+  });
+
+  group('known non-contacts', () {
+    test('kept across runners on one connection, dropped on disconnect', () {
+      for (final event in ScopeStopEvent.values) {
+        final h = _Harness();
+        h.lifecycle.knownNonContactsFor(h.connection).add('AB' * 32);
+        h.lifecycle.onEvent(event);
+        expect(h.lifecycle.knownNonContactsFor(h.connection),
+            event.dropsConnection ? isEmpty : hasLength(1),
+            reason: event.name);
+      }
+    });
+
+    test('a new connection starts with none', () {
+      final h = _Harness();
+      h.lifecycle.knownNonContactsFor(h.connection).add('AB' * 32);
+      expect(h.lifecycle.knownNonContactsFor(Object()), isEmpty);
+    });
+
+    test('reading restores and known non-contacts for the same new '
+        'connection resets both together, whichever is read first', () {
+      final h = _Harness();
+      h.lifecycle.restoresFor(h.connection).add(ContactRecord.newRepeater(
+          publicKey: Uint8List.fromList(List.filled(32, 0x11)),
+          name: 'R',
+          lat: 1,
+          lon: 2,
+          nowSecs: 5));
+      h.lifecycle.knownNonContactsFor(h.connection).add('AB' * 32);
+      final other = Object();
+      // Read known-non-contacts first this time: it must not leave the
+      // restores list stale for the same new connection.
+      expect(h.lifecycle.knownNonContactsFor(other), isEmpty);
+      expect(h.lifecycle.restoresFor(other), isEmpty);
     });
   });
 
@@ -573,7 +610,7 @@ void main() {
           gate: gate(),
           connection: conn,
           deviceKey: 'KEY',
-          create: (key, restores) => ScopeRunner(
+          create: (key, restores, knownNonContacts) => ScopeRunner(
             radio: MeshCoreScopeRadio(conn),
             cancel: ScopeCancelToken(),
             hardStop: clock.now().add(const Duration(seconds: 30)),
@@ -589,6 +626,7 @@ void main() {
             onActiveChanged: h.lifecycle.setRequestActive,
             onLogged: (_) {},
             pendingRestores: restores,
+            knownNonContacts: knownNonContacts,
           ),
         )!;
         runner.run([_cand(0x11)], discPersisted: Future<void>.value());
@@ -665,7 +703,7 @@ void main() {
           gate: gate(),
           connection: conn,
           deviceKey: 'KEY',
-          create: (key, restores) => ScopeRunner(
+          create: (key, restores, knownNonContacts) => ScopeRunner(
             radio: MeshCoreScopeRadio(conn),
             cancel: ScopeCancelToken(),
             hardStop: clock.now().add(const Duration(seconds: 30)),
@@ -681,6 +719,7 @@ void main() {
             onActiveChanged: h.lifecycle.setRequestActive,
             onLogged: (_) {},
             pendingRestores: restores,
+            knownNonContacts: knownNonContacts,
           ),
         )!;
         runner.run([_cand(0x11)], discPersisted: Future<void>.value());

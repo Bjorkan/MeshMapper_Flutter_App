@@ -72,6 +72,7 @@ class ScopeLifecycle {
   ScopeRunner? _live;
   Object? _restoresOwner;
   final List<ContactRecord> _restores = [];
+  final Set<String> _knownNonContacts = {};
   int _modeSwitches = 0;
   Timer? _repeaterRefreshTimer;
 
@@ -96,11 +97,26 @@ class ScopeLifecycle {
   /// The routes borrowed and not yet written back on [connection]. A
   /// different connection starts with none.
   List<ContactRecord> restoresFor(Object connection) {
+    _syncConnectionScopeState(connection);
+    return _restores;
+  }
+
+  /// The pubkeys this connection's own lookups already proved are not saved
+  /// contacts. A different connection starts with none.
+  Set<String> knownNonContactsFor(Object connection) {
+    _syncConnectionScopeState(connection);
+    return _knownNonContacts;
+  }
+
+  /// Resets every per-connection scope state ([_restores],
+  /// [_knownNonContacts]) together the first time [connection] is seen,
+  /// keyed on the same owner so neither can go stale relative to the other.
+  void _syncConnectionScopeState(Object connection) {
     if (!identical(_restoresOwner, connection)) {
       _restores.clear();
+      _knownNonContacts.clear();
       _restoresOwner = connection;
     }
-    return _restores;
   }
 
   /// One sweep's runner, or null when the gate is closed, an Offline Mode
@@ -111,8 +127,8 @@ class ScopeLifecycle {
     required ScopeGateInputs gate,
     required Object? connection,
     required String? deviceKey,
-    required ScopeRunner Function(
-            String deviceKey, List<ContactRecord> pendingRestores)
+    required ScopeRunner Function(String deviceKey,
+            List<ContactRecord> pendingRestores, Set<String> knownNonContacts)
         create,
   }) {
     if (!scopeDiscoveryGateOpen(gate)) return null;
@@ -122,7 +138,8 @@ class ScopeLifecycle {
       return null;
     }
     if (connection == null || deviceKey == null) return null;
-    final runner = create(deviceKey, restoresFor(connection));
+    final runner = create(
+        deviceKey, restoresFor(connection), knownNonContactsFor(connection));
     _live = runner;
     return runner;
   }
@@ -140,6 +157,7 @@ class ScopeLifecycle {
     stopRepeaterRefreshTimer();
     if (event.dropsConnection) {
       _restores.clear();
+      _knownNonContacts.clear();
       _restoresOwner = null;
     }
   }

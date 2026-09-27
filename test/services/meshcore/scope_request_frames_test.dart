@@ -269,6 +269,107 @@ void main() {
     });
   });
 
+  group('a full contact table', () {
+    test('a table-full send to a non-contact sets the connection flag and '
+        'marks the outcome', () {
+      onScopeClock(ScopeRadio.new, (async, radio, conn) {
+        expect(conn.scopeCannotAskNonContacts, isFalse);
+        ScopeRequestOutcome? outcome;
+        ask(async, conn, (o) => outcome = o);
+        radio.emit([ResponseCodes.err, ErrorCodes.notFound]);
+        async.flushMicrotasks();
+        radio.emit([ResponseCodes.err, ErrorCodes.tableFull]);
+        async.flushMicrotasks();
+        expect(outcome, isA<ScopeRadioError>());
+        final err = outcome! as ScopeRadioError;
+        expect(err.code, ErrorCodes.tableFull);
+        expect(err.nonContactTableFull, isTrue);
+        expect(conn.scopeCannotAskNonContacts, isTrue);
+        expect(radio.commands,
+            [CommandCodes.getContactByKey, CommandCodes.sendAnonReq]);
+      });
+    });
+
+    test('a table-full send to a SAVED contact never sets the flag', () {
+      onScopeClock(ScopeRadio.new, (async, radio, conn) {
+        final payload = scopeContactPayload(pubkey: key);
+        ScopeRequestOutcome? outcome;
+        ask(async, conn, (o) => outcome = o);
+        radio.emit(contactFrame(payload));
+        async.flushMicrotasks();
+        radio.emit([ResponseCodes.ok]);
+        async.flushMicrotasks();
+        radio.emit([ResponseCodes.err, ErrorCodes.tableFull]);
+        async.flushMicrotasks();
+        // The ERR still owes the borrow's restore before the outcome lands.
+        expect(radio.commands.last, CommandCodes.addUpdateContact);
+        radio.emit([ResponseCodes.ok]);
+        async.flushMicrotasks();
+        expect(outcome, isA<ScopeRadioError>());
+        final err = outcome! as ScopeRadioError;
+        expect(err.code, ErrorCodes.tableFull);
+        expect(err.nonContactTableFull, isFalse);
+        expect(conn.scopeCannotAskNonContacts, isFalse);
+      });
+    });
+
+    test(
+        'once the flag is set, a fresh non-contact lookup ends the ask '
+        'without a send', () {
+      onScopeClock(ScopeRadio.new, (async, radio, conn) {
+        ask(async, conn, (_) {});
+        radio.emit([ResponseCodes.err, ErrorCodes.notFound]);
+        async.flushMicrotasks();
+        radio.emit([ResponseCodes.err, ErrorCodes.tableFull]);
+        async.flushMicrotasks();
+        expect(conn.scopeCannotAskNonContacts, isTrue);
+
+        final before = radio.commands.length;
+        ScopeRequestOutcome? outcome;
+        ask(async, conn, (o) => outcome = o);
+        radio.emit([ResponseCodes.err, ErrorCodes.notFound]);
+        async.flushMicrotasks();
+        expect(outcome, isA<ScopeNonContactRefused>());
+        expect(radio.commands.sublist(before), [CommandCodes.getContactByKey],
+            reason: 'the lookup happens, but nothing is sent');
+        expect(conn.isScopeLeaseActive, isFalse);
+      });
+    });
+
+    test('once the flag is set, a saved contact is still asked normally',
+        () {
+      onScopeClock(ScopeRadio.new, (async, radio, conn) {
+        ask(async, conn, (_) {});
+        radio.emit([ResponseCodes.err, ErrorCodes.notFound]);
+        async.flushMicrotasks();
+        radio.emit([ResponseCodes.err, ErrorCodes.tableFull]);
+        async.flushMicrotasks();
+        expect(conn.scopeCannotAskNonContacts, isTrue);
+
+        final payload = scopeContactPayload(pubkey: key);
+        ScopeRequestOutcome? outcome;
+        ask(async, conn, (o) => outcome = o);
+        radio.emit(contactFrame(payload));
+        async.flushMicrotasks();
+        expect(radio.commands.last, CommandCodes.addUpdateContact,
+            reason: 'the borrow still happens for a saved contact');
+        radio.emit([ResponseCodes.ok]);
+        async.flushMicrotasks();
+        radio.emit(sentFrame());
+        async.flushMicrotasks();
+        expect(radio.commands, contains(CommandCodes.sendAnonReq));
+        // The restore (the original route written back) before the lease
+        // releases into the answer wait.
+        expect(radio.commands.last, CommandCodes.addUpdateContact);
+        radio.emit([ResponseCodes.ok]);
+        async.flushMicrotasks();
+        radio.emit(answerPush());
+        async.flushMicrotasks();
+        expect(outcome, isA<ScopeAnswered>());
+      });
+    });
+  });
+
   group('stray replies during the answer wait', () {
     for (final stray in <String, List<List<int>>>{
       'a TX ERR': [

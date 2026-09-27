@@ -19,6 +19,12 @@ enum ScopeLogOutcome {
   /// The radio refused a step with an error code.
   radioError,
 
+  /// The radio refused the send because the repeater is not a saved contact
+  /// and its contact table is full (companion firmware bug, fixed in
+  /// v1.17.0). Set only for that exact case; every other ERR is
+  /// [radioError].
+  radioContactsFull,
+
   /// The repeater answered, but this device's hourly upload cap was full.
   withheldHourlyCap,
 }
@@ -31,6 +37,7 @@ extension ScopeLogOutcomeLabel on ScopeLogOutcome {
         ScopeLogOutcome.flooded => 'Sent as a flood by the radio',
         ScopeLogOutcome.malformed => 'Unreadable answer',
         ScopeLogOutcome.radioError => 'Radio error',
+        ScopeLogOutcome.radioContactsFull => 'Radio contact list full',
         ScopeLogOutcome.withheldHourlyCap =>
           'Not uploaded: hourly limit reached',
       };

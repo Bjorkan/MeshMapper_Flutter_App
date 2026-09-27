@@ -193,6 +193,8 @@ class WardrivingSettingsPage extends StatelessWidget {
                   ),
                   ScopeDiscoveryFirmwareNote(
                       show: appState.scopeDiscoveryNeedsNewerFirmware),
+                  ScopeDiscoveryContactsFullNote(
+                      show: appState.scopeDiscoveryNeedsContactSlot),
                 ],
               ),
               value: appState.scopeDiscoveryEnabled,

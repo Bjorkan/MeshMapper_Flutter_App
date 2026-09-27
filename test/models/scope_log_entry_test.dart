@@ -9,6 +9,7 @@ void main() {
       'Sent as a flood by the radio',
       'Unreadable answer',
       'Radio error',
+      'Radio contact list full',
       'Not uploaded: hourly limit reached',
     ]);
   });
@@ -87,6 +88,19 @@ void main() {
       );
       expect(entry.toCsv(),
           '2026-09-26T10:00:00.000Z,45.1,-75.2,AB,noResponse,""');
+    });
+
+    test('a radio-contacts-full entry carries its own outcome word', () {
+      final entry = ScopeLogEntry(
+        timestamp: DateTime.utc(2026, 9, 26, 10, 0, 0),
+        latitude: 45.1,
+        longitude: -75.2,
+        repeaterId: 'AB',
+        pubkeyHex: 'AB' * 32,
+        outcome: ScopeLogOutcome.radioContactsFull,
+      );
+      expect(entry.toCsv(),
+          '2026-09-26T10:00:00.000Z,45.1,-75.2,AB,radioContactsFull,""');
     });
 
     test('an answered entry with an empty scope list still quotes empty', () {
