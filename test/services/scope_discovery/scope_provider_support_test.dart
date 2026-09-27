@@ -96,6 +96,33 @@ void main() {
           isTrue);
     });
 
+    test('a custom maxAge is honoured (mode-start 5 minute check)', () {
+      expect(
+          scopeRepeaterRefreshDue(
+              active: true,
+              loadedAt: now.subtract(const Duration(minutes: 4)),
+              now: now,
+              maxAge: scopeListRefreshOnStartAge),
+          isFalse,
+          reason: '4 minutes < 5 minute maxAge');
+      expect(
+          scopeRepeaterRefreshDue(
+              active: true,
+              loadedAt: now.subtract(const Duration(minutes: 6)),
+              now: now,
+              maxAge: scopeListRefreshOnStartAge),
+          isTrue,
+          reason: '6 minutes >= 5 minute maxAge');
+      expect(
+          scopeRepeaterRefreshDue(
+              active: false,
+              loadedAt: now.subtract(const Duration(minutes: 6)),
+              now: now,
+              maxAge: scopeListRefreshOnStartAge),
+          isFalse,
+          reason: 'inactive: never due, whatever the age');
+    });
+
     test('a refetch landing after a zone change is discarded', () {
       expect(
           scopeRepeaterRefreshStillCurrent(
@@ -124,6 +151,61 @@ void main() {
               currentZone: 'YOW',
               currentFilterKey: null),
           isTrue);
+    });
+  });
+
+  group('the Passive/Hybrid mode-start refresh plan', () {
+    final now = DateTime(2026, 9, 26, 12);
+
+    test('a 4-minute-old list: timer armed, no immediate refresh', () {
+      final plan = scopeModeStartRefreshPlan(
+          active: true,
+          zone: 'YOW',
+          loadedAt: now.subtract(const Duration(minutes: 4)),
+          now: now);
+      expect(plan.refreshNow, isFalse);
+      expect(plan.armTimer, isTrue);
+    });
+
+    test('a 6-minute-old list: refreshes at once and arms the timer', () {
+      final plan = scopeModeStartRefreshPlan(
+          active: true,
+          zone: 'YOW',
+          loadedAt: now.subtract(const Duration(minutes: 6)),
+          now: now);
+      expect(plan.refreshNow, isTrue);
+      expect(plan.armTimer, isTrue);
+    });
+
+    test('no list loaded yet: refreshes at once and arms the timer', () {
+      final plan = scopeModeStartRefreshPlan(
+          active: true, zone: 'YOW', loadedAt: null, now: now);
+      expect(plan.refreshNow, isTrue);
+      expect(plan.armTimer, isTrue);
+    });
+
+    test('scope discovery inactive: nothing at all, whatever the age', () {
+      final plan = scopeModeStartRefreshPlan(
+          active: false,
+          zone: 'YOW',
+          loadedAt: now.subtract(const Duration(hours: 1)),
+          now: now);
+      expect(plan.refreshNow, isFalse);
+      expect(plan.armTimer, isFalse);
+    });
+
+    test('no zone yet: nothing at all', () {
+      final plan = scopeModeStartRefreshPlan(
+          active: true, zone: null, loadedAt: null, now: now);
+      expect(plan.refreshNow, isFalse);
+      expect(plan.armTimer, isFalse);
+    });
+
+    test('an empty zone string: nothing at all', () {
+      final plan = scopeModeStartRefreshPlan(
+          active: true, zone: '', loadedAt: null, now: now);
+      expect(plan.refreshNow, isFalse);
+      expect(plan.armTimer, isFalse);
     });
   });
 

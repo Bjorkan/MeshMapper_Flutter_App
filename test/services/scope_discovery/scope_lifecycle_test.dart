@@ -379,6 +379,98 @@ void main() {
     });
   });
 
+  group('the periodic repeater refresh timer', () {
+    test('not running until started', () {
+      final h = _Harness();
+      expect(h.lifecycle.repeaterRefreshTimerRunning, isFalse);
+    });
+
+    test('ticks at 15 and 30 minutes, not before', () {
+      fakeAsync((async) {
+        final h = _Harness();
+        var ticks = 0;
+        h.lifecycle.startRepeaterRefreshTimer(
+            const Duration(minutes: 15), () => ticks++);
+        expect(h.lifecycle.repeaterRefreshTimerRunning, isTrue);
+
+        async.elapse(const Duration(minutes: 14, seconds: 59));
+        expect(ticks, 0);
+        async.elapse(const Duration(seconds: 1));
+        expect(ticks, 1);
+
+        async.elapse(const Duration(minutes: 14, seconds: 59));
+        expect(ticks, 1);
+        async.elapse(const Duration(seconds: 1));
+        expect(ticks, 2);
+      });
+    });
+
+    test('starting again reschedules from now rather than stacking ticks',
+        () {
+      fakeAsync((async) {
+        final h = _Harness();
+        var ticks = 0;
+        h.lifecycle.startRepeaterRefreshTimer(
+            const Duration(minutes: 15), () => ticks++);
+        async.elapse(const Duration(minutes: 10));
+        h.lifecycle.startRepeaterRefreshTimer(
+            const Duration(minutes: 15), () => ticks++);
+        // The old schedule would have ticked at 15 minutes; the new one
+        // (restarted at 10) only ticks at 25.
+        async.elapse(const Duration(minutes: 5));
+        expect(ticks, 0);
+        async.elapse(const Duration(minutes: 10));
+        expect(ticks, 1);
+      });
+    });
+
+    test('stopRepeaterRefreshTimer cancels it; idempotent when not running',
+        () {
+      fakeAsync((async) {
+        final h = _Harness();
+        var ticks = 0;
+        h.lifecycle.startRepeaterRefreshTimer(
+            const Duration(minutes: 15), () => ticks++);
+        h.lifecycle.stopRepeaterRefreshTimer();
+        expect(h.lifecycle.repeaterRefreshTimerRunning, isFalse);
+        async.elapse(const Duration(minutes: 30));
+        expect(ticks, 0);
+        // Stopping again (nothing running) does not throw.
+        h.lifecycle.stopRepeaterRefreshTimer();
+      });
+    });
+
+    for (final event in ScopeStopEvent.values) {
+      test('onEvent(${event.name}) stops it', () {
+        fakeAsync((async) {
+          final h = _Harness();
+          h.lifecycle.startRepeaterRefreshTimer(
+              const Duration(minutes: 15), () {});
+          h.lifecycle.onEvent(event);
+          expect(h.lifecycle.repeaterRefreshTimerRunning, isFalse);
+        });
+      });
+    }
+
+    test('onGateChanged stops it when the gate closes, even with no live '
+        'runner', () {
+      final h = _Harness();
+      h.lifecycle.startRepeaterRefreshTimer(
+          const Duration(minutes: 15), () {});
+      expect(h.lifecycle.repeaterRefreshTimerRunning, isTrue);
+      h.lifecycle.onGateChanged(_gate(userEnabled: false));
+      expect(h.lifecycle.repeaterRefreshTimerRunning, isFalse);
+    });
+
+    test('onGateChanged leaves it running while the gate stays open', () {
+      final h = _Harness();
+      h.lifecycle.startRepeaterRefreshTimer(
+          const Duration(minutes: 15), () {});
+      h.lifecycle.onGateChanged(_gate());
+      expect(h.lifecycle.repeaterRefreshTimerRunning, isTrue);
+    });
+  });
+
   group('a live auth that withdraws scope discovery', () {
     test('stops a pending lookup before the scope request is written', () {
       support.onScopeClock(support.ScopeRadio.new, (async, radio, conn) {

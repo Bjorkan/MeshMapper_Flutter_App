@@ -7,6 +7,17 @@ import '../../utils/public_key.dart';
 /// it fetched again (the server's `scopes_checked_at` rides on it).
 const Duration kScopeRepeaterListMaxAge = Duration(hours: 1);
 
+/// How old the repeater list may be when Passive or Hybrid mode starts
+/// before scope discovery refreshes it right away, rather than waiting for
+/// the connect-time refresh or the next periodic tick.
+const Duration scopeListRefreshOnStartAge = Duration(minutes: 5);
+
+/// How often the repeater list is refreshed while Passive or Hybrid mode
+/// keeps running, so another phone's answers (the server's
+/// `scopes_checked_at`) reach this phone sooner than the connect-time
+/// refresh alone would.
+const Duration scopeListRefreshPeriod = Duration(minutes: 15);
+
 /// The server's scope stamp per repeater, keyed by the full upper-case
 /// public key. Repeaters without a full key are left out.
 Map<String, int?> scopeServerInfoMap(List<Repeater> repeaters) => {
@@ -25,14 +36,43 @@ Map<String, int?> scopeServerInfoMap(List<Repeater> repeaters) => {
   return (onList: true, checkedAt: map[key]);
 }
 
-/// Whether the connect-time repeater list refresh is due: scope discovery
-/// is active and the list is missing or older than
-/// [kScopeRepeaterListMaxAge].
-bool scopeRepeaterRefreshDue(
-    {required bool active, required DateTime? loadedAt, required DateTime now}) {
+/// Whether a repeater list refresh is due: scope discovery is active and
+/// the list is missing or older than [maxAge] (the connect-time refresh's
+/// [kScopeRepeaterListMaxAge] by default; the mode-start check passes
+/// [scopeListRefreshOnStartAge] instead).
+bool scopeRepeaterRefreshDue({
+  required bool active,
+  required DateTime? loadedAt,
+  required DateTime now,
+  Duration maxAge = kScopeRepeaterListMaxAge,
+}) {
   if (!active) return false;
   if (loadedAt == null) return true;
-  return now.difference(loadedAt) >= kScopeRepeaterListMaxAge;
+  return now.difference(loadedAt) >= maxAge;
+}
+
+/// What starting Passive or Hybrid mode should do about the repeater list:
+/// nothing at all while scope discovery is inactive or there is no zone yet
+/// (a user without scope discovery sees no change in traffic), otherwise
+/// [refreshNow] fires an immediate refresh when the list is already older
+/// than [scopeListRefreshOnStartAge], and [armTimer] says to start the
+/// periodic refresh regardless (it has nothing to do with how stale the
+/// list happens to be right now).
+({bool refreshNow, bool armTimer}) scopeModeStartRefreshPlan({
+  required bool active,
+  required String? zone,
+  required DateTime? loadedAt,
+  required DateTime now,
+}) {
+  if (!active || zone == null || zone.isEmpty) {
+    return (refreshNow: false, armTimer: false);
+  }
+  final refreshNow = scopeRepeaterRefreshDue(
+      active: true,
+      loadedAt: loadedAt,
+      now: now,
+      maxAge: scopeListRefreshOnStartAge);
+  return (refreshNow: refreshNow, armTimer: true);
 }
 
 /// Whether replacing [before] with [after] changes anything the map draws.

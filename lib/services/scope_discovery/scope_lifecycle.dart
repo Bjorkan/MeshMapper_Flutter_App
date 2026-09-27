@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import '../../utils/debug_logger_io.dart';
 import '../meshcore/connection.dart' show ContactRecord;
 import 'scope_provider_support.dart';
@@ -71,6 +73,7 @@ class ScopeLifecycle {
   Object? _restoresOwner;
   final List<ContactRecord> _restores = [];
   int _modeSwitches = 0;
+  Timer? _repeaterRefreshTimer;
 
   /// [cancelHostRunner] cancels the runner PingService holds;
   /// [onBadgeChanged] is a plain notify (the badge is not on the map).
@@ -126,18 +129,40 @@ class ScopeLifecycle {
 
   /// Ends any scope work at once for [event]: the runner PingService holds
   /// and the last one built here are cancelled (nothing more goes on the
-  /// air for them), the badge clears, and a lost connection takes its
-  /// borrowed routes with it.
+  /// air for them), the badge clears, the periodic repeater refresh timer
+  /// stops, and a lost connection takes its borrowed routes with it.
   void onEvent(ScopeStopEvent event) {
     _cancelHostRunner(event.reason);
     final live = _live;
     _live = null;
     live?.cancel(event.reason);
     setRequestActive(false);
+    stopRepeaterRefreshTimer();
     if (event.dropsConnection) {
       _restores.clear();
       _restoresOwner = null;
     }
+  }
+
+  /// True while the periodic repeater-list refresh (Passive or Hybrid mode
+  /// running) is scheduled.
+  bool get repeaterRefreshTimerRunning => _repeaterRefreshTimer != null;
+
+  /// (Re)starts the periodic repeater-list refresh: cancels any existing
+  /// schedule first, so calling this again while one is already running
+  /// reschedules it from now rather than stacking ticks. [onTick] fires
+  /// every [period]; this scheduling is dumb on purpose, so the caller
+  /// re-checks the gate, the zone and the radio preset itself on every
+  /// tick, exactly as the connect-time refresh does.
+  void startRepeaterRefreshTimer(Duration period, void Function() onTick) {
+    _repeaterRefreshTimer?.cancel();
+    _repeaterRefreshTimer = Timer.periodic(period, (_) => onTick());
+  }
+
+  /// Stops the periodic repeater-list refresh. Idempotent.
+  void stopRepeaterRefreshTimer() {
+    _repeaterRefreshTimer?.cancel();
+    _repeaterRefreshTimer = null;
   }
 
   /// Starts an Offline Mode switch in either direction ([event] is
@@ -164,10 +189,13 @@ class ScopeLifecycle {
   /// Called whenever a gate input changes outside the stop events: a live
   /// `/auth` answer (a session recovery included) that drops or disables
   /// `scope_discovery`, or the user's own switch. A gate that is now closed
-  /// cancels the live runner at once, so a lease mid-exchange writes nothing
-  /// more (no borrow, no scope request). An open gate changes nothing.
+  /// stops the periodic repeater refresh timer (whether or not a request
+  /// happens to be running) and cancels a live runner at once, so a lease
+  /// mid-exchange writes nothing more (no borrow, no scope request). An
+  /// open gate changes nothing.
   void onGateChanged(ScopeGateInputs gate) {
     if (scopeDiscoveryGateOpen(gate)) return;
+    stopRepeaterRefreshTimer();
     final live = _live;
     if (live == null || live.isCancelled) return;
     debugLog('[SCOPES] Scope discovery switched off with a request running');

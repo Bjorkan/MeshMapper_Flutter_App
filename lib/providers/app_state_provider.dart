@@ -719,6 +719,10 @@ class AppStateProvider extends ChangeNotifier with WidgetsBindingObserver {
   /// older than an hour at connect).
   DateTime? _repeatersLoadedAt;
 
+  /// True while a scope-discovery repeater list refresh (connect-time,
+  /// mode-start or periodic) is in flight, so only one runs at a time.
+  bool _scopeRepeaterRefreshInFlight = false;
+
   // ============================================
   // Scope discovery (background scope runner)
   // ============================================
@@ -7660,6 +7664,10 @@ class AppStateProvider extends ChangeNotifier with WidgetsBindingObserver {
     _autoPingTimer.stop();
     _rxWindowTimer.stop();
 
+    // The mode is ending: the periodic scope-discovery repeater refresh
+    // (Passive or Hybrid only) has nothing left to run for.
+    _scopeLifecycle.stopRepeaterRefreshTimer();
+
     if (_preferences.offlineMode && !_modeSwitchOwnsOfflineSave) {
       await _saveOfflineSession();
     }
@@ -7807,6 +7815,10 @@ class AppStateProvider extends ChangeNotifier with WidgetsBindingObserver {
           _rxWindowTimer.stop();
           // Clear top-heard overlay on mode switch
           _clearOverlayState();
+          // Stop the scope-discovery periodic repeater refresh (Passive or
+          // Hybrid may not be the mode ending here); restarted below if the
+          // new mode is Passive or Hybrid.
+          _scopeLifecycle.stopRepeaterRefreshTimer();
           // Save offline session if offline mode is enabled
           if (_preferences.offlineMode) {
             await _saveOfflineSession();
@@ -7856,6 +7868,9 @@ class AppStateProvider extends ChangeNotifier with WidgetsBindingObserver {
         _autoPingEnabled = true;
         _idleAutoStopReference = DateTime.now();
         _startLiveActivitySession(startedAt: sessionStartedAt);
+        if (isPassive || isHybrid) {
+          _startScopeRepeaterRefreshForRunningMode();
+        }
 
         // Start noise floor session for graph tracking. The label is the
         // enum's own name (active/passive/hybrid/targeted).
@@ -10609,37 +10624,81 @@ class AppStateProvider extends ChangeNotifier with WidgetsBindingObserver {
     await disconnect();
   }
 
-  /// Ruling 10: the connect-time repeater refresh for scope discovery. A
-  /// list that lands after the zone or the radio preset moved is dropped.
+  /// Ruling 10: the connect-time, mode-start and periodic repeater refresh
+  /// for scope discovery. A list that lands after the zone or the radio
+  /// preset moved is dropped. Only one refresh runs at a time; a call while
+  /// one is already in flight is a no-op.
   Future<void> _refreshRepeatersForScopes(String iata) async {
-    debugLog('[SCOPES] Refreshing the repeater list for zone $iata');
-    final fetched = await _scopeLifecycle.resultIfStillCurrent(
-      fetch: _apiService.fetchRepeaters(iata),
-      zone: iata,
-      preset: radioFilterKey,
-      currentZone: () => zoneCode,
-      currentPreset: () => radioFilterKey,
-    );
-    if (fetched == null || fetched.isEmpty) return;
-    final refreshed = rcComputeExclusions(fetched);
-    // Wanted for its scope stamps: when nothing the map draws moved, the
-    // map is not rebuilt for it (Rule 9).
-    final mapChanged = !_repeatersLoaded ||
-        _repeatersLoadedForIata != iata ||
-        scopeRefreshChangesMap(_repeaters, refreshed);
-    _repeaters = refreshed;
-    _repeaterConflictHexIds = rcConflictHexIds(_repeaters);
-    _siriRepeaterCatalogRevision++;
-    _repeatersLoaded = true;
-    _repeatersLoadedForIata = iata;
-    _repeatersLoadedAt = DateTime.now();
-    debugLog('[SCOPES] Repeater list refreshed (${_repeaters.length}'
-        '${mapChanged ? '' : ', nothing on the map changed'})');
-    if (mapChanged) {
-      _notifyMapNow();
-    } else {
-      notifyListeners();
+    if (_scopeRepeaterRefreshInFlight) {
+      debugLog('[SCOPES] Repeater list refresh for zone $iata skipped: '
+          'one is already in flight');
+      return;
     }
+    _scopeRepeaterRefreshInFlight = true;
+    try {
+      debugLog('[SCOPES] Refreshing the repeater list for zone $iata');
+      final fetched = await _scopeLifecycle.resultIfStillCurrent(
+        fetch: _apiService.fetchRepeaters(iata),
+        zone: iata,
+        preset: radioFilterKey,
+        currentZone: () => zoneCode,
+        currentPreset: () => radioFilterKey,
+      );
+      if (fetched == null || fetched.isEmpty) return;
+      final refreshed = rcComputeExclusions(fetched);
+      // Wanted for its scope stamps: when nothing the map draws moved, the
+      // map is not rebuilt for it (Rule 9).
+      final mapChanged = !_repeatersLoaded ||
+          _repeatersLoadedForIata != iata ||
+          scopeRefreshChangesMap(_repeaters, refreshed);
+      _repeaters = refreshed;
+      _repeaterConflictHexIds = rcConflictHexIds(_repeaters);
+      _siriRepeaterCatalogRevision++;
+      _repeatersLoaded = true;
+      _repeatersLoadedForIata = iata;
+      _repeatersLoadedAt = DateTime.now();
+      debugLog('[SCOPES] Repeater list refreshed (${_repeaters.length}'
+          '${mapChanged ? '' : ', nothing on the map changed'})');
+      if (mapChanged) {
+        _notifyMapNow();
+      } else {
+        notifyListeners();
+      }
+    } finally {
+      _scopeRepeaterRefreshInFlight = false;
+    }
+  }
+
+  /// Passive or Hybrid mode just started: refreshes the repeater list at
+  /// once when it is already older than [scopeListRefreshOnStartAge]
+  /// (rather than waiting for the connect-time refresh or the first
+  /// periodic tick to catch it), then arms the periodic refresh
+  /// ([scopeListRefreshPeriod]) for as long as the mode keeps running.
+  /// Both are gated on [scopeDiscoveryActive] (gate open, not offline,
+  /// firmware at or above the floor), so a user without scope discovery
+  /// sees no change in traffic. The timer itself is stopped wherever the
+  /// mode stops or the connection goes (`toggleAutoPing`'s mode switch,
+  /// `_finishAutoPingStop`, and every `ScopeLifecycle` stop event).
+  void _startScopeRepeaterRefreshForRunningMode() {
+    final plan = scopeModeStartRefreshPlan(
+        active: scopeDiscoveryActive,
+        zone: zoneCode,
+        loadedAt: _repeatersLoadedAt,
+        now: DateTime.now());
+    if (!plan.armTimer) return;
+    if (plan.refreshNow) {
+      debugLog('[SCOPES] Repeater list refresh on mode start (older than '
+          '${scopeListRefreshOnStartAge.inMinutes}m)');
+      unawaited(_refreshRepeatersForScopes(zoneCode!));
+    }
+    _scopeLifecycle.startRepeaterRefreshTimer(scopeListRefreshPeriod, () {
+      if (!scopeDiscoveryActive) return;
+      final z = zoneCode;
+      if (z == null || z.isEmpty) return;
+      debugLog('[SCOPES] Periodic repeater list refresh '
+          '(${scopeListRefreshPeriod.inMinutes}m)');
+      unawaited(_refreshRepeatersForScopes(z));
+    });
   }
 
   /// Builds one sweep's scope runner, or null when scope discovery is not

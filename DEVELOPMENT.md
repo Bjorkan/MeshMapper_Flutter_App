@@ -668,6 +668,38 @@ Off by default until a region turns it on.
   when a hold starts or extends, and the sweep summary line reports how many candidates were
   held.
 
+- **The repeater list refresh cadence**: the due rule reads the server's own `scopes_checked_at`
+  off the repeater list (`AppStateProvider._repeaters`), which the app itself must keep fetching
+  or another phone's answers never reach this one. Three triggers share the same refresh
+  (`AppStateProvider._refreshRepeatersForScopes`, `ScopeLifecycle.resultIfStillCurrent`'s discard
+  when the zone or radio preset moved while it was in flight, and `scopeRefreshChangesMap`'s "did
+  this change anything the map draws" check, all unchanged): at connect, a list missing or older
+  than 1 hour (`kScopeRepeaterListMaxAge`); when Passive or Hybrid mode starts, a list older than
+  5 minutes (`scopeListRefreshOnStartAge`), refreshed at once rather than waiting on the other
+  two triggers; and, for as long as Passive or Hybrid keeps running, every 15 minutes
+  (`scopeListRefreshPeriod`), unconditionally, since a phone driving for an hour needs more than
+  the connect-time refresh caught at the start of the drive. All three are gated on
+  `scopeDiscoveryActive` (offered, the effective switch on, not Offline Mode, firmware at or
+  above the floor) and a known zone, so a user without scope discovery, or before a zone check
+  has landed, sees no change in traffic; `scopeModeStartRefreshPlan`
+  (`lib/services/scope_discovery/scope_provider_support.dart`) is the pure decision for the
+  mode-start trigger (whether to refresh at once, and whether to arm the periodic timer at all),
+  kept separate from the network call so it is unit-testable with a fake clock. Only one refresh
+  runs at a time across all three triggers (`AppStateProvider._scopeRepeaterRefreshInFlight`); a
+  trigger that lands while one is already in flight is a no-op, not a queued retry, since the
+  next connect, mode-start or periodic tick asks again anyway.
+  The periodic timer (`ScopeLifecycle.startRepeaterRefreshTimer`/`stopRepeaterRefreshTimer`) is
+  a dumb repeating scheduler with no memory of the gate itself; every tick and the mode-start
+  check both re-read `scopeDiscoveryActive` and the zone at the moment they fire. It stops on
+  whichever ends first: the mode itself stopping (`AppStateProvider._finishAutoPingStop`, and the
+  mode-switch teardown inside `toggleAutoPing`'s start branch, since switching between two
+  running modes never passes through `_finishAutoPingStop`), or any `ScopeLifecycle` stop event
+  (disconnect in both flows, an Offline Mode switch in either direction, a zone transfer, the
+  gate closing under a live session, and dispose), all of which now stop the timer inside
+  `ScopeLifecycle.onEvent` itself, and `onGateChanged` stops it even with no scope request
+  currently running (a gate closing between sweeps must not leave the timer ticking on into a
+  session that can no longer ask anything).
+
 - **Why requests run one at a time, and why pings may run alongside them**: the companion keeps
   one pending request outstanding, the same reason Repeater Administrators' own commands never
   overlap, so the runner asks its chosen repeaters strictly in sequence, one lease per repeater,
@@ -2432,10 +2464,10 @@ All API endpoints may return maintenance mode:
 - `lib/services/meshcore/disc_tracker.dart` - Discovery response tracking (7s window)
 - `lib/services/scope_discovery/scope_regions_codec.dart` - Repeater scope reply codec: builds the regions request, parses the byte-faithful reply, the server's token rule
 - `lib/services/meshcore/scope_lease.dart` - The short radio lease a scope request borrows: admission, the write gate, the hold cap, the request/restore frames
-- `lib/services/scope_discovery/scope_discovery_rules.dart` - The due rule, the phone-side answer cache, the per-device-hour upload budget
+- `lib/services/scope_discovery/scope_discovery_rules.dart` - The due rule, the phone-side answer cache (including the no-answer hold), the per-device-hour upload budget
 - `lib/services/scope_discovery/scope_runner.dart` - One discovery sweep's scope runner: choosing repeaters, the answer wait, the hard stop, persistence
-- `lib/services/scope_discovery/scope_lifecycle.dart` - The scope discovery gate and the provider's lifecycle wiring: stop events, borrowed-route bookkeeping, the connect-time repeater refresh
-- `lib/services/scope_discovery/scope_provider_support.dart` - Pure helpers behind the provider's scope discovery wiring: server info lookup, refresh staleness
+- `lib/services/scope_discovery/scope_lifecycle.dart` - The scope discovery gate and the provider's lifecycle wiring: stop events, borrowed-route bookkeeping, the repeater refresh discard, the periodic repeater refresh timer
+- `lib/services/scope_discovery/scope_provider_support.dart` - Pure helpers behind the provider's scope discovery wiring: server info lookup, refresh staleness at connect/mode-start, the mode-start refresh plan
 - `lib/models/scope_log_entry.dart` - `ScopeLogEntry` / `ScopeLogOutcome` and the scope log's own capped list store
 - `lib/widgets/scope_discovery_firmware_note.dart` - The firmware-floor note shown under the Scope Discovery switch
 - `lib/services/meshcore/rx_logger.dart` - Passive observation logging
