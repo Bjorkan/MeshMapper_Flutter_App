@@ -827,11 +827,22 @@ class AppStateProvider extends ChangeNotifier with WidgetsBindingObserver {
             companionSupportsRepeaterAdmin(companionFirmwareVersionCode),
       );
 
-  /// True while a scope lease holds the radio or its reply debt is still
-  /// owed (Manage waits for it).
+  /// True while a scope lease holds the radio or a reply to a command it
+  /// wrote is still owed (Manage waits for it). Replies owed to ordinary
+  /// traffic do not count.
   bool get isScopeRadioBusy => scopeRadioBusy(
       isScopeLeaseActive: _meshCoreConnection?.isScopeLeaseActive ?? false,
       hasScopeReplyDebt: _meshCoreConnection?.hasScopeReplyDebt ?? false);
+
+  /// Rebuilds Manage when [connection]'s scope-busy flag flips. The
+  /// connection fires only on a real change, never per frame, and this is a
+  /// plain notify: the map does not render it (Rule 9).
+  void _wireScopeRadioBusy(MeshCoreConnection connection) {
+    connection.onScopeRadioBusyChanged = () {
+      if (_isDisposed || !identical(_meshCoreConnection, connection)) return;
+      notifyListeners();
+    };
+  }
 
   /// The connected companion's cached claims, or the deduplicated cache while
   /// no companion is connected.
@@ -4305,6 +4316,7 @@ class AppStateProvider extends ChangeNotifier with WidgetsBindingObserver {
         _activeTransport = _bluetoothService;
         debugLog('[APP] Creating new MeshCoreConnection');
         _meshCoreConnection = MeshCoreConnection(transport: _bluetoothService);
+        _wireScopeRadioBusy(_meshCoreConnection!);
 
         if (!_preferences.offlineMode) {
           _meshCoreConnection!.onRequestAuth = _createAuthCallback();
@@ -4481,6 +4493,7 @@ class AppStateProvider extends ChangeNotifier with WidgetsBindingObserver {
 
       debugLog('[APP] Creating new MeshCoreConnection (TCP)');
       _meshCoreConnection = MeshCoreConnection(transport: tcpService);
+      _wireScopeRadioBusy(_meshCoreConnection!);
 
       if (!_preferences.offlineMode) {
         _meshCoreConnection!.onRequestAuth = _createAuthCallback();
@@ -4611,6 +4624,7 @@ class AppStateProvider extends ChangeNotifier with WidgetsBindingObserver {
 
       debugLog('[APP] Creating new MeshCoreConnection (USB Serial)');
       _meshCoreConnection = MeshCoreConnection(transport: serialService);
+      _wireScopeRadioBusy(_meshCoreConnection!);
 
       if (!_preferences.offlineMode) {
         _meshCoreConnection!.onRequestAuth = _createAuthCallback();
@@ -4734,6 +4748,7 @@ class AppStateProvider extends ChangeNotifier with WidgetsBindingObserver {
 
       debugLog('[APP] Creating new MeshCoreConnection (generic transport)');
       _meshCoreConnection = MeshCoreConnection(transport: transport);
+      _wireScopeRadioBusy(_meshCoreConnection!);
 
       if (!_preferences.offlineMode) {
         _meshCoreConnection!.onRequestAuth = _createAuthCallback();

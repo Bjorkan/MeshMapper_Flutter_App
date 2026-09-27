@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:typed_data';
 
 import 'package:flutter_test/flutter_test.dart';
@@ -402,15 +403,31 @@ void main() {
       final before = transport.writes.length;
       expect(await session.login('admin-pw'), isFalse);
       expect(session.lastError, kScopeRadioBusyHint);
-      await lease!.release();
-      // A command still owed its reply after the lease ends.
-      await connection.debugWriteRaw(
-          Uint8List.fromList([CommandCodes.getContactByKey, ...repeaterKey]));
+      // A command the lease wrote, still owed its reply after the lease
+      // ends.
+      unawaited(lease!.restore(ContactRecord.parse(BufferReader(
+          Uint8List.fromList(contactPayload(repeaterKey))))));
+      await transport.settle();
+      await lease.release();
+      expect(connection.hasScopeReplyDebt, isTrue);
       final owed = transport.writes.length;
       expect(await session.login('admin-pw'), isFalse);
       expect(session.lastError, kScopeRadioBusyHint);
       expect(transport.writes.length, owed);
       expect(owed, before + 1);
+
+      // Once that reply lands the radio is Manage's again.
+      transport.emit([ResponseCodes.ok]);
+      await transport.settle();
+      expect(connection.isScopeRadioBusy, isFalse);
+    });
+
+    test('reply debt from ordinary traffic is not a scope request', () async {
+      await connection.debugWriteRaw(
+          Uint8List.fromList([CommandCodes.getContactByKey, ...repeaterKey]));
+      expect(connection.repliesOwedCount, 1);
+      expect(connection.hasScopeReplyDebt, isFalse);
+      expect(connection.isScopeRadioBusy, isFalse);
     });
 
     test('PATH_UPDATED re-reads the contact', () async {

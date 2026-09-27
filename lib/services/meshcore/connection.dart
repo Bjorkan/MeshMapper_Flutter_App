@@ -237,10 +237,16 @@ class _OwedReply {
   final int command;
   final bool selfTelemetry;
   final bool opensContactStream;
+
+  /// Written by a scope lease. Only these keep Manage waiting once the
+  /// lease has ended: ordinary traffic owes replies too, and never did.
+  final bool scopeOwned;
   Timer? expiry;
 
   _OwedReply(this.command,
-      {required this.selfTelemetry, required this.opensContactStream});
+      {required this.selfTelemetry,
+      required this.opensContactStream,
+      this.scopeOwned = false});
 }
 
 /// The parsed RESP_CODE_SENT frame: [flood:1][tag:4][est_timeout_ms:u32].
@@ -1452,8 +1458,29 @@ class MeshCoreConnection {
   /// True while a scope lease holds the radio.
   bool get isScopeLeaseActive => _lease != null;
 
-  /// True while the radio still owes a reply to a command already written.
-  bool get hasScopeReplyDebt => _repliesOwed.isNotEmpty;
+  /// True while the radio still owes a reply to a command a scope lease
+  /// wrote. Replies owed to ordinary traffic (the pollers, a flood scope
+  /// write) do not count: the admin lane has always coped with those.
+  bool get hasScopeReplyDebt => _repliesOwed.any((e) => e.scopeOwned);
+
+  /// Scope discovery owns the radio: a lease is held, or a reply is still
+  /// owed for a command one wrote. What Manage waits for.
+  bool get isScopeRadioBusy => _lease != null || hasScopeReplyDebt;
+
+  /// Fired synchronously whenever [isScopeRadioBusy] flips, and only then:
+  /// a lease granted or ended, or the last scope-owned reply retired,
+  /// expired or cleared. Wired to a plain provider notify so Manage
+  /// re-reads the flag the moment the radio frees up.
+  void Function()? onScopeRadioBusyChanged;
+  bool _scopeRadioBusyReported = false;
+
+  void _reportScopeRadioBusy() {
+    final busy = isScopeRadioBusy;
+    if (busy == _scopeRadioBusyReported) return;
+    _scopeRadioBusyReported = busy;
+    debugLog('[SCOPES] Radio ${busy ? 'held' : 'free'} for Manage');
+    onScopeRadioBusyChanged?.call();
+  }
 
   /// True during the answer wait that follows a lease (the admin slot is
   /// held by the scope listen).
@@ -1560,6 +1587,7 @@ class MeshCoreConnection {
     final lease = ScopeLease(host: _scopeHost, cancel: cancel);
     _lease = lease;
     debugLog('[SCOPES] Lease granted');
+    _reportScopeRadioBusy();
     return lease;
   }
 
@@ -1586,6 +1614,7 @@ class MeshCoreConnection {
         '${listen ? ', waiting for the answer' : ''}'
         '${_repliesOwed.isEmpty ? '' : ' (${_repliesOwed.length} reply owed)'}');
     if (!isScopeListenActive) _notifyScopeIdle();
+    _reportScopeRadioBusy();
   }
 
   /// Ends the answer wait and frees the admin slot.
@@ -2135,7 +2164,8 @@ class MeshCoreConnection {
       for (var i = 0; i < shape.replies; i++)
         _OwedReply(code,
             selfTelemetry: shape.selfTelemetry,
-            opensContactStream: shape.opensContactStream),
+            opensContactStream: shape.opensContactStream,
+            scopeOwned: lease != null),
     ];
     _repliesOwed.addAll(owed);
     if (shape.replies == 0 && !_radioRestarting) {
@@ -2237,6 +2267,7 @@ class MeshCoreConnection {
       entry.expiry?.cancel();
       entry.expiry = Timer(replyOwedExpiry, () {
         if (_repliesOwed.remove(entry)) {
+          _reportScopeRadioBusy();
           debugLog('[CONN] No reply to command ${entry.command} within '
               '${replyOwedExpiry.inSeconds}s, dropped from the reply ledger');
           // The reply may still come, and nothing says which later frame
@@ -2283,6 +2314,7 @@ class MeshCoreConnection {
     if (_repliesOwed.isEmpty) return true;
     final entry = _repliesOwed.removeAt(0);
     entry.expiry?.cancel();
+    if (entry.scopeOwned) _reportScopeRadioBusy();
     if (entry.opensContactStream &&
         code != ResponseCodes.contactsStart &&
         _contactsStream == ContactsStreamState.requested) {
@@ -2320,6 +2352,7 @@ class MeshCoreConnection {
       entry.expiry?.cancel();
     }
     _repliesOwed.clear();
+    _reportScopeRadioBusy();
     _contactsStreamWatchdog?.cancel();
     _contactsStreamWatchdog = null;
     _contactsStream = ContactsStreamState.none;

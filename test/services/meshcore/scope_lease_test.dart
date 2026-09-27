@@ -142,7 +142,8 @@ void main() {
         conn.setFloodScope(flood16);
         async.elapse(const Duration(seconds: 60));
         expect(conn.repliesOwedCount, 1);
-        expect(conn.hasScopeReplyDebt, isTrue);
+        // Owed, but not to a scope lease: Manage does not wait for it.
+        expect(conn.hasScopeReplyDebt, isFalse);
       });
     });
 

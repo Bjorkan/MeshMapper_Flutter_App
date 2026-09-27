@@ -204,7 +204,14 @@ typedef _TargetedDeps = ({
   bool isAutoReconnecting,
   int repeaterCount,
   int? companionFirmwareVersionCode,
+  // Manage waits on it; the provider notifies when it flips.
+  bool isScopeRadioBusy,
 });
+
+/// The Trace row's Selector record, public so a test can drive the real
+/// selector against a fake provider.
+@visibleForTesting
+Object targetedDepsOf(AppStateProvider s) => _targetedDepsOf(s);
 
 _TargetedDeps _targetedDepsOf(AppStateProvider s) {
   final prefs = s.preferences;
@@ -223,6 +230,7 @@ _TargetedDeps _targetedDepsOf(AppStateProvider s) {
     isAutoReconnecting: s.isAutoReconnecting,
     repeaterCount: s.repeaterCount,
     companionFirmwareVersionCode: s.companionFirmwareVersionCode,
+    isScopeRadioBusy: s.isScopeRadioBusy,
   );
 }
 

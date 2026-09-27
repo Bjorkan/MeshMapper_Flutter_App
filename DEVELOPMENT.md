@@ -685,7 +685,14 @@ Off by default until a region turns it on.
   restore) is only written with the ledger clear and at least 500 ms left on the clock.
   Reaching the cap while a send has already gone out still lets that request's own answer wait
   continue outside the lease; reaching it before the send goes out ends the request at once
-  (`hold_cap`) rather than wait for a reply that may never come.
+  (`hold_cap`) rather than wait for a reply that may never come. **Manage waits for it**:
+  `MeshCoreConnection.isScopeRadioBusy` is true while a lease is held or a reply to a command
+  a lease wrote is still owed (`hasScopeReplyDebt` counts only those entries, so the pollers'
+  and other ordinary replies never hold Manage). The connection fires `onScopeRadioBusyChanged`
+  only when that flag actually flips (grant, release, the last scope reply retiring, expiring
+  or being cleared), and the provider answers with a plain `notifyListeners()`, never a
+  `mapRevision` bump; the Trace row's Selector record carries the flag, so Manage re-enables the
+  moment the radio frees up instead of waiting for an unrelated control change.
 
 - **The zero-hop route borrow and its byte-exact restore**: a repeater already known as a
   multi-hop contact would otherwise route a scope request the long way and answer late, so the
