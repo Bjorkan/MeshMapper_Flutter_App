@@ -335,21 +335,39 @@ void main() {
 
     test('two answers persisting at once both land (serialized writes)', () async {
       final release1 = Completer<void>();
-      final saves = <Map<String, dynamic>>[];
+      final firstSaveStarted = Completer<void>();
+      final snapshots = <Map<String, dynamic>>[];
       var saveCallCount = 0;
       final budget = ScopeHourlyBudget(save: (json) async {
         saveCallCount++;
+        // Capture the snapshot, and signal that this save has genuinely
+        // started, before doing anything else: production code fixes the
+        // snapshot at the moment it calls `save`, not at the moment `save`
+        // finishes, so the test must observe it at that same point.
+        snapshots.add(json);
         if (saveCallCount == 1) {
+          firstSaveStarted.complete();
           // Hold the first save open so a second, concurrent persist has
           // every chance to jump ahead if writes are not actually
           // serialized.
           await release1.future;
         }
-        saves.add(json);
       });
 
       expect(budget.tryConsume(keyA, now), isTrue);
       final f1 = budget.persistReservation(keyA, now ~/ 3600);
+
+      // Wait for the first save to actually start, with its snapshot
+      // already taken, before reserving the second answer. Reserving it any
+      // earlier would let both reservations land in `_counts` before either
+      // save runs, which proves nothing about write ordering: the fix here
+      // is to only make the second reservation once the first save is
+      // provably mid-write.
+      await firstSaveStarted.future;
+      expect(snapshots[0]['$keyA|${now ~/ 3600}'], 1);
+      expect(snapshots[0].containsKey('$keyB|${now ~/ 3600}'), isFalse,
+          reason:
+              'the first save must not see a reservation made after it started');
 
       expect(budget.tryConsume(keyB, now), isTrue);
       final f2 = budget.persistReservation(keyB, now ~/ 3600);
@@ -360,18 +378,17 @@ void main() {
       await Future<void>.delayed(Duration.zero);
       expect(saveCallCount, 1,
           reason: 'the second save must wait for the first to finish');
-      expect(saves, isEmpty, reason: 'nothing has landed yet');
+      expect(snapshots.length, 1, reason: 'the second save has not landed yet');
 
       release1.complete();
       final results = await Future.wait([f1, f2]);
       expect(results, [isTrue, isTrue]);
       expect(saveCallCount, 2);
 
-      // The last write to actually land reflects both reservations: no
-      // lost update.
-      final last = saves.last;
-      expect(last['$keyA|${now ~/ 3600}'], 1);
-      expect(last['$keyB|${now ~/ 3600}'], 1);
+      // The second save's own snapshot, the final state actually written,
+      // reflects both reservations: no lost update.
+      expect(snapshots[1]['$keyA|${now ~/ 3600}'], 1);
+      expect(snapshots[1]['$keyB|${now ~/ 3600}'], 1);
     });
 
     test('two overlapping reservations for the same bucket: it survives '
