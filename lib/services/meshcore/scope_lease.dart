@@ -294,7 +294,10 @@ class ScopeLease {
 
     // Stage 2: send, and arm the answer tag inside the SENT dispatch.
     final answer = _host.armScopeAnswer();
-    unawaited(answer.then((_) {}, onError: (_) {}));
+    // The answer can land while the restore is still in flight; keep it so
+    // an answer that beat its deadline is never thrown away.
+    ScopeAnswerPush? received;
+    unawaited(answer.then((a) => received = a, onError: (_) => null));
     int? estTimeoutMs;
     bool flood = false;
     DateTime? sentAt;
@@ -363,8 +366,13 @@ class ScopeLease {
 
     var waitEnd = sentAt!.add(wait);
     if (notAfter.isBefore(waitEnd)) waitEnd = notAfter;
-    final remaining = waitEnd.difference(clock.now());
-    final result = await _awaitAnswer(answer, remaining);
+    final early = received;
+    final Object result;
+    if (early != null && !early.receivedAt.isAfter(waitEnd)) {
+      result = early;
+    } else {
+      result = await _awaitAnswer(answer, waitEnd.difference(clock.now()));
+    }
     _host.endListen();
     switch (result) {
       case ScopeAnswerPush(:final body, :final receivedAt):

@@ -86,6 +86,39 @@ void main() {
     });
   });
 
+  test('an answer that lands during a slow restore is kept', () {
+    onScopeClock(ScopeRadio.new, (async, radio, conn) {
+      final payload = scopeContactPayload(pubkey: key);
+      ScopeRequestOutcome? outcome;
+      ask(async, conn, (o) => outcome = o,
+          answerWait: const Duration(seconds: 1));
+      radio.emit(contactFrame(payload));
+      async.flushMicrotasks();
+      radio.emit([ResponseCodes.ok]);
+      async.flushMicrotasks();
+      final sentAt = clock.now();
+      radio.emit(sentFrame());
+      async.flushMicrotasks();
+      expect(radio.writes.last, [CommandCodes.addUpdateContact, ...payload]);
+      // The answer arrives 0.2 s after SENT, inside its 1 s wait ...
+      async.elapse(const Duration(milliseconds: 200));
+      radio.emit(answerPush(body: [0, 0, 0, 0, 0x41]));
+      async.flushMicrotasks();
+      // ... and the restore OK only at 2 s, after the answer wait ran out.
+      async.elapse(const Duration(milliseconds: 1800));
+      expect(outcome, isNull);
+      radio.emit([ResponseCodes.ok]);
+      async.flushMicrotasks();
+      expect(outcome, isA<ScopeAnswered>());
+      final answered = outcome! as ScopeAnswered;
+      expect(answered.body, [0, 0, 0, 0, 0x41]);
+      expect(
+          answered.receivedAt, sentAt.add(const Duration(milliseconds: 200)));
+      expect(answered.restoreOwed, isFalse);
+      expect(conn.isScopeListenActive, isFalse);
+    });
+  });
+
   test('a contact the radio does not know (ERR 2) goes straight to the send',
       () {
     onScopeClock(ScopeRadio.new, (async, radio, conn) {

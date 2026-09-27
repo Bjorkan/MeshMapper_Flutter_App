@@ -636,6 +636,10 @@ class MeshCoreConnection {
   // connection is rebuilt.
   bool _scopeSuspended = false;
 
+  // A reboot or reset was written: the radio is going away, so no lease is
+  // admitted on this connection object again (a reconnect builds a new one).
+  bool _radioRestarting = false;
+
   // The live lease, its admin-slot token and the gate every other write
   // waits at while it is held.
   ScopeLease? _lease;
@@ -1439,9 +1443,9 @@ class MeshCoreConnection {
       _scopeListenToken != null &&
       identical(_adminCommandInFlight, _scopeListenToken);
 
-  /// True once a contact stream went silent; no lease is admitted for the
-  /// rest of this connection.
-  bool get isScopeDiscoverySuspended => _scopeSuspended;
+  /// True once a contact stream went silent, or a reboot or reset was
+  /// written; no lease is admitted for the rest of this connection.
+  bool get isScopeDiscoverySuspended => _scopeSuspended || _radioRestarting;
 
   bool get _scopeOwnsSlot {
     final owner = _adminCommandInFlight;
@@ -1507,6 +1511,7 @@ class MeshCoreConnection {
     if (epoch != _scopeEpoch) return 'connection closed';
     if (cancel.isCancelled) return 'cancelled';
     if (_scopeSuspended) return 'suspended after a silent contact stream';
+    if (_radioRestarting) return 'a reboot or reset was sent to the radio';
     return null;
   }
 
@@ -2112,6 +2117,13 @@ class MeshCoreConnection {
             opensContactStream: shape.opensContactStream),
     ];
     _repliesOwed.addAll(owed);
+    if (shape.replies == 0 && !_radioRestarting) {
+      // Reboot, factory reset or a CLI reboot: the radio answers nothing and
+      // goes away. No lease until the connection is rebuilt.
+      _radioRestarting = true;
+      debugWarn('[SCOPES] Command $code restarts the radio; scope discovery '
+          'off until reconnect');
+    }
     if (shape.opensContactStream) {
       _setContactsStream(ContactsStreamState.requested);
     }
@@ -2121,13 +2133,11 @@ class MeshCoreConnection {
     try {
       await _transport.write(bytes);
     } catch (_) {
-      // The frame did not go out: a stream it would have started is not
-      // coming. Its ledger entries stay (a throw can still hide a delivered
-      // frame) and expire as usual.
-      if (shape.opensContactStream &&
-          _contactsStream == ContactsStreamState.requested) {
-        _setContactsStream(ContactsStreamState.none);
-      }
+      // CompanionTransport cannot say whether a throwing write went out
+      // before it failed, so every throw is ambiguous: the ledger entries
+      // stay (and expire as usual) and a contact stream stays requested, so
+      // a CONTACTS_START that does arrive opens it, and a stream that never
+      // comes trips the silence rule instead of letting a lease in.
       _armReplyExpiry(owed);
       rethrow;
     }

@@ -186,12 +186,53 @@ void main() {
       });
     });
 
-    test('none when the write throws before sending', () {
+    test('a throwing write is ambiguous: the stream stays requested', () {
       onScopeClock(ScopeRadio.new, (async, radio, conn) {
+        // The transport cannot say whether a throw came before or after
+        // sending, so even a throw before sending keeps the stream owed.
         radio.failWrites = true;
         conn.debugWriteRaw(bytes(getContacts)).then((_) {}, onError: (_) {});
         async.flushMicrotasks();
+        expect(conn.contactsStreamState, ContactsStreamState.requested);
+        // No frame ever comes: the silence rule suspends scope discovery.
+        async.elapse(const Duration(seconds: 60));
+        expect(conn.isScopeDiscoverySuspended, isTrue);
+        expect(grant(async, conn, wait: const Duration(milliseconds: 200)),
+            isNull);
+      });
+    });
+
+    test(
+        'a stream delivered before the write threw still opens and blocks '
+        'the lease', () {
+      onScopeClock(ScopeRadio.new, (async, radio, conn) {
+        radio.failAfterSend = true;
+        Object? error;
+        conn.debugWriteRaw(bytes(getContacts)).then((_) {},
+            onError: (Object e) {
+          error = e;
+        });
+        async.flushMicrotasks();
+        radio.failAfterSend = false;
+        expect(error, isA<StateError>());
+        expect(conn.contactsStreamState, ContactsStreamState.requested);
+
+        radio.emit([ResponseCodes.contactsStart, 2, 0, 0, 0]);
+        async.flushMicrotasks();
+        expect(conn.contactsStreamState, ContactsStreamState.open);
+        expect(conn.repliesOwedCount, 0);
+        radio.emit(contactFrame(scopeContactPayload(pubkey: key)));
+        async.flushMicrotasks();
+        // A lease attempt mid-stream is refused: a streamed CONTACT must
+        // never be taken as a lookup reply.
+        expect(grant(async, conn, wait: const Duration(milliseconds: 200)),
+            isNull);
+        expect(radio.writes.length, 1);
+        radio.emit(contactFrame(scopeContactPayload(pubkey: scopeKey(0x22))));
+        radio.emit([ResponseCodes.endOfContacts, 0, 0, 0, 0]);
+        async.flushMicrotasks();
         expect(conn.contactsStreamState, ContactsStreamState.none);
+        expect(grant(async, conn), isNotNull);
       });
     });
 
@@ -247,6 +288,57 @@ void main() {
           1);
       // A fresh connection object starts clean.
       onScopeClock(ScopeRadio.new, (async, radio, conn) {
+        expect(grant(async, conn), isNotNull);
+      });
+    });
+  });
+
+  group('radio restart', () {
+    for (final entry in <String, List<int>>{
+      'reboot': [CommandCodes.reboot, ...utf8.encode('reboot')],
+      'factory reset': [CommandCodes.factoryReset, ...utf8.encode('reset')],
+      'CLI reboot': [CommandCodes.runCliCommand, ...utf8.encode('reboot')],
+    }.entries) {
+      test('after a ${entry.key} no lease is admitted until reconnect', () {
+        final lines = captureScopeLog();
+        onScopeClock(ScopeRadio.new, (async, radio, conn) {
+          conn.debugWriteRaw(bytes(entry.value));
+          async.flushMicrotasks();
+          expect(conn.repliesOwedCount, 0);
+          expect(conn.isScopeDiscoverySuspended, isTrue);
+          expect(grant(async, conn), isNull);
+          async.elapse(const Duration(seconds: 30));
+          conn.disconnect();
+          async.flushMicrotasks();
+          expect(grant(async, conn), isNull,
+              reason: 'only a new connection object clears it');
+        });
+        expect(
+            lines.any((l) =>
+                l.contains('[SCOPES] Lease not admitted') &&
+                l.contains('reboot or reset')),
+            isTrue);
+        onScopeClock(ScopeRadio.new, (async, radio, conn) {
+          expect(grant(async, conn), isNotNull);
+        });
+      });
+    }
+
+    test('reboot() blocks the lease', () {
+      onScopeClock(ScopeRadio.new, (async, radio, conn) {
+        conn.reboot();
+        async.flushMicrotasks();
+        expect(grant(async, conn), isNull);
+      });
+    });
+
+    test('a reboot payload that is not the magic word blocks nothing', () {
+      onScopeClock(ScopeRadio.new, (async, radio, conn) {
+        conn.debugWriteRaw(
+            bytes([CommandCodes.reboot, ...utf8.encode('rebut!')]));
+        async.flushMicrotasks();
+        radio.emit([ResponseCodes.err, ErrorCodes.illegalArg]);
+        async.flushMicrotasks();
         expect(grant(async, conn), isNotNull);
       });
     });

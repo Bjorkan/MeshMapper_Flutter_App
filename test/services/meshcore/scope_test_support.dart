@@ -19,10 +19,15 @@ class ScopeRadio extends FakeCompanionTransport {
   /// Commands whose write is recorded and then never returns.
   final Set<int> stallCommands = <int>{};
 
+  /// Set true to record the frame (it reached the radio) and then throw,
+  /// the ambiguous-delivery case.
+  bool failAfterSend = false;
+
   @override
   Future<void> write(Uint8List data) async {
     if (failWrites) throw StateError('fake transport link is down');
     writes.add(Uint8List.fromList(data));
+    if (failAfterSend) throw StateError('fake transport lost the ack');
     if (data.isNotEmpty && stallCommands.contains(data.first)) {
       await Completer<void>().future;
     }
