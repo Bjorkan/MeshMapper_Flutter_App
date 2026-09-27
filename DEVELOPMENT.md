@@ -420,6 +420,11 @@ landed in the queue. The discovery countdown is the one timer the user stop path
 and the hot switch stops, because a discovery window still open belongs to the session being
 torn down.
 
+Scope discovery (see below) rides Passive and Hybrid's own discovery results and works
+alongside them without changing anything about their schedule: it never moves a discovery or a
+TX interval, and a scope request in progress never delays the next scheduled ping. It has
+nothing to do with Active or Trace mode, neither of which runs a discovery.
+
 ### GPS & Zone Validation
 
 - Uses `geolocator` package with high accuracy and continuous tracking
@@ -594,13 +599,205 @@ untouched. On by default with a 14 day window.
   `DEFER` enqueue) and `[PING]` / `[DISC]` (deferrals, releases and drops). The batch and
   heartbeat request summaries under `[API]` / `[HEARTBEAT]` show `auto_mode`.
 
+### Scope Discovery
+
+After a discovery sweep finds repeaters, the app can ask up to 3 of the strongest ones which
+scopes (the channels or contacts a repeater passes) they carry, and upload each answer as its
+own `SCOPES` item. It never runs on its own: it only follows a discovery that a Passive or
+Hybrid session already made, and it never delays, replaces, or is delayed by, a TX or discovery
+ping. Off by default until a region turns it on.
+
+- **The gate**: `/auth` carries `scope_discovery` (bool) and `scope_refresh_days` (int) on every
+  live and offline-mode auth. **Server first is built into the gate itself**: an old server
+  that never adds the key is read as key absent, and the app then never asks and never uploads
+  a `SCOPES` item, whatever the user's own switch says, with no separate version check needed
+  anywhere else. Key present with `true` (or `1`) locks the user's switch on and enforces the
+  server's own interval (floored at 7 days, no ceiling); any other value leaves the user's own
+  switch and interval in force (default off, 14 days, minimum 7, clamped rather than falling
+  back to the default the way Smart Ping's interval does). `AppStateProvider.scopeDiscoveryActive`
+  (`scopeDiscoveryGateOpen` in `lib/services/scope_discovery/scope_lifecycle.dart`) is the one
+  predicate every send site reads: offered, (enforced OR the user switch), never in Offline
+  Mode, and the connected companion's firmware at or above the floor below. Settings (Settings
+  -> Wardriving -> Auto-Ping, beneath Smart Pinging): a `Scope Discovery` switch, an (i) button
+  explaining it in plain words, an amber "Set by Regional Admin" subtitle, and a locked switch
+  and interval tile while enforced.
+
+- **Firmware floor**: companion firmware code 13 (`kScopeDiscoveryFirmwareFloor`, shipped as
+  v1.16.0) or newer. Below it `scopeDiscoveryActive` reads false no matter what the switch
+  says, and the switch's subtitle shows `ScopeDiscoveryFirmwareNote`, "Your radio needs
+  firmware v1.16.0 or newer for this." The setting still saves: nothing is asked and nothing
+  extra goes on the air until the radio is updated, so a user does not lose their own choice by
+  upgrading later.
+
+- **The due rule and the phone cache** (`lib/services/scope_discovery/scope_discovery_rules.dart`,
+  `isScopeQueryDue`): a repeater is due only when BOTH the server's own `scopes_checked_at` for
+  it (missing, or older than the interval in force, counts as due) AND the phone's own cached
+  answer for it (the same rule) call for a fresh ask, and no earlier answer for it is still
+  being written (`pendingPersist`). The phone cache (`ScopeQueryCache`) only ever remembers an
+  ANSWER: a timeout, a malformed reply, a flood or a radio error is logged and simply leaves no
+  entry behind, so that repeater reads as due again at the very next discovery, however many
+  times that happens. It is JSON in `user_preferences` (`scope_query_cache`), pruned at load to
+  the interval in force and capped at 20,000 entries (oldest evicted first past the cap), so a
+  stamp written just before a crash still suppresses the ask afterward.
+
+- **Why requests run one at a time, and why pings may run alongside them**: the companion keeps
+  one pending request outstanding, the same reason Repeater Administrators' own commands never
+  overlap, so the runner asks its chosen repeaters strictly in sequence, one lease per repeater,
+  never in parallel. A TX or discovery ping is a different matter: while the short-lived radio
+  lease actually holds the radio (below), another write simply waits its turn at the same gate
+  a sign write parks other writers behind, so nothing is lost, only delayed by at most the
+  lease's own hold. Once the lease releases and the runner is only listening for the tagged
+  answer, a ping can go out and come back without touching that listen at all, since only a
+  frame carrying the answer's own tag ends it early: nothing else in flight ever clears it.
+
+- **The short radio lease** (`lib/services/meshcore/scope_lease.dart`, `ScopeLease`): exists so
+  a scope ask can never indefinitely delay a ping or a repeater-admin command, or the reverse.
+  **Admission** is granted only in one synchronous step, with nothing else already holding the
+  radio: no sign in progress or waiting, no admin session open, the contact stream idle, and
+  the connection's reply ledger completely clear, meaning every earlier command already
+  accounted for exactly one owed reply (`getContacts` opens a stream instead of one; self
+  telemetry and a reboot, factory reset or CLI reboot owe none), so a lease is never granted
+  while anything is still owed an answer. **The write gate**: exactly as a `CMD_SIGN_DATA`
+  write queues every other write behind `_signGate` (see MyMeshMapper Account), a granted lease
+  opens its own gate the same way: every OTHER write queues behind it and goes out once the
+  lease releases, while the lease's own commands skip that queue and go straight to the
+  transport. **The hold cap**: at most 4 seconds from grant (`kScopeLeaseHold`), long enough for
+  a lookup, a route borrow, the send and the restore, never longer; a new command (or a queued
+  restore) is only written with the ledger clear and at least 500 ms left on the clock.
+  Reaching the cap while a send has already gone out still lets that request's own answer wait
+  continue outside the lease; reaching it before the send goes out ends the request at once
+  (`hold_cap`) rather than wait for a reply that may never come.
+
+- **The zero-hop route borrow and its byte-exact restore**: a repeater already known as a
+  multi-hop contact would otherwise route a scope request the long way and answer late, so the
+  lease rewrites its route to zero-hop (`out_path_len 0`) for the one send, using the contact
+  record exactly as read (`ContactRecord.withOutPathLen(0)`), then writes the SAME record back
+  byte for byte afterward, its raw 32-byte name field and whatever `lastmod` it carried
+  included, so nothing about the contact changes except the trip this one request takes. A
+  restore that cannot be written before the lease's own deadline is kept (`unrestored`) and
+  held (`ScopeLifecycle.restoresFor`) across runner sweeps on the same connection until it
+  succeeds, ahead of anything else that connection's next lease writes; a repeater that is not
+  yet a contact skips the borrow entirely, since firmware sends the request direct with
+  nothing to restore.
+
+  **An accepted residual**: the lookup and the send are not atomic. Firmware can auto-add or
+  refresh a contact from an advert that happens to arrive in the gap between them, and when it
+  does the send goes out as a flood instead of direct. `SENT`'s own flood byte catches this
+  after the fact (`ScopeFlooded`, logged and moved past), but nothing on the app side can
+  prevent it; documented here rather than chased as a bug.
+
+- **Choosing repeaters and the distance gate**: strongest local RSSI first, local SNR to break
+  a tie, then the repeater's key for a stable order past that; at most 3 per sweep
+  (`ScopeRunner.maxAsksPerSweep`). A repeater whose discovery reply put it more than 300 m from
+  the phone's current position is skipped (a car that has already moved on should not spend
+  airtime re-asking a repeater it left behind); a phone with no current fix skips the gate
+  rather than block on it.
+
+- **The answer wait**: each repeater's own measured discovery reply time (`DiscTracker`'s
+  `discoveryReplyAfter` for THIS sweep's own tag, never a foreign one) plus a 2 second margin
+  (`discoveryReplyMargin`), capped at 7 seconds total (`kScopeAnswerWaitCap`); a repeater with
+  no measured reply time (its discovery answered before the runner started, or under a foreign
+  tag) gets the full 7 second cap reserved instead, since the radio's own timing estimate is
+  only known after `SENT`. The margin exists because the discovery reply time only measures how
+  long a much shorter frame took to come back over that route; the scope answer is a longer
+  push over the same path, so a fixed pad is added rather than assuming an identical round
+  trip. Every ask is checked against the next scheduled discovery twice: before it starts
+  (admission wait, the lease's own hold and the answer wait must all still fit before the next
+  discovery is due) and again right after the lease is granted (just the hold and the wait,
+  since the admission time is already spent); either check failing stops the whole runner
+  rather than let an ask begin that cannot finish.
+
+- **The hard stop and cancellation**: a runner never outlives 30 seconds (`maxRunnerLifetime`)
+  or the next scheduled discovery send, whichever comes first, and a Timer enforces it even
+  mid-ask. Cancellation reaches the same runner from many places: the next discovery send
+  (about to reuse the radio), a newer sweep superseding an older one, Stop (parked behind an
+  in-flight TX, or immediate), force disable, the airborne block, an Offline Mode switch in
+  either direction, a zone transfer, user disconnect, the full disconnect cleanup,
+  auto-reconnect, and provider disposal (`ScopeStopEvent` in
+  `lib/services/scope_discovery/scope_lifecycle.dart`). Every one of these cancels the
+  runner's token at once (no further frame goes out for it), releases a held lease
+  synchronously, and clears the badge; a connection actually going away also drops any route
+  still owed a restore, since the radio forgets it anyway on reconnect.
+
+- **The "Scopes" badge**: a small pill on the Passive and Hybrid ping buttons only (never
+  Active or Trace, neither of which runs a discovery) while a request is out
+  (`AppStateProvider.isScopeRequestActive`, a plain `notifyListeners()`, never a `mapRevision`
+  bump, per Rule 9). It never changes a button's label or its countdown text, only adds the
+  pill, and it never blocks a tap.
+
+- **The Scopes log entry**: only a request that actually reached a repeater and got an answer
+  or a refusal is logged (`ScopeLogEntry` / `ScopeLogOutcome` in
+  `lib/models/scope_log_entry.dart`): answered (with the scope names exactly as received, case
+  kept), no response, flooded, unreadable answer, radio error, or withheld by the hourly cap. A
+  local failure, an abort, a cancel or the distance gate never reached a repeater and stay
+  debug log lines only. Entries live in their own `ScopeLogStore` (newest first, capped at 500,
+  cleared by both Clear Pings and Clear All Logs), merge into the unified log tab under an
+  `SCP` filter, and export to CSV with the same `SCOPES,` prefix in both the filtered and the
+  full export.
+
+- **Accepted non-atomic risks, besides the lookup-versus-send one above**: persisting an
+  accepted answer is three separate steps run one after another, an hourly-budget reservation,
+  the queue enqueue, then the cache stamp, each independently loggable. A crash between the
+  first two loses the answer with its hour slot already spent; a crash between the last two
+  leaves the answer queued (it still uploads) but not yet remembered as answered, so the same
+  repeater can be asked again before its own earlier answer has even left the phone. Both are
+  rare and self-correcting (the repeater is simply asked again), so neither is treated as a bug
+  to chase. Separately, a lease reply that arrives after the lease has already released (a slow
+  restore `OK`, past the 4 second hold) can be claimed by an unrelated pending TX or discovery
+  reply instead of being ignored, the same limitation an unrelated poll error already had
+  before this feature existed; not fixed here.
+
+- **The 60 per device-hour budget** (`ScopeHourlyBudget`, same file as the due rule): at most 60
+  `SCOPES` uploads per connected device (its radio public key, or the session id with no key)
+  per hour of the ANSWER's own timestamp, mirroring the server's own cap exactly. The runner
+  checks the budget before every ask and stops the WHOLE sweep, not just that one repeater,
+  once the hour is full, since asking further would only produce more answers the budget
+  cannot accept.
+
+- **DISC before SCOPES, every upload, and the cross-zone residual**: the server only accepts a
+  `SCOPES` item for a device that also uploaded a DISC for the same repeater with a timestamp
+  within 1800 seconds, in the same batch or an earlier one. `orderDiscBeforeScopes` (a stable
+  partition) enforces this ordering everywhere pings leave the phone: the normal batch queue,
+  the pre-disconnect snapshot, and the offline-session export; `selectBatchWithScopesDependency`
+  additionally keeps a `SCOPES` out of a batch entirely while its DISC is still queued anywhere
+  (Hive or memory, regardless of retry backoff), so a DISC still waiting out a retry holds its
+  own SCOPES back rather than let it upload alone. **A residual the server accepts**: DISC-heard
+  is stored against the zone that processed that batch. A zone transfer clears the online queue
+  and bumps its own generation, and the transfer's own selection keeps a `SCOPES` with its DISC
+  while that DISC is still queued, but a `SCOPES` that reaches the server in a different zone's
+  batch than its own DISC is still dropped there, since the two were processed by different
+  zones. Documented as accepted, not fixed on the app side
+  (`MeshMapper_Server/docs/APP_API.md`).
+
+- **The upload-door strip, and Offline Mode never asking**: a `SCOPES` item is dropped, never
+  uploaded and never forwarded to the custom third-party endpoint, the moment the live
+  `scope_discovery` key goes missing from a later `/auth` (the region turned the feature off,
+  or the app reconnected to a region that never had it), whether or not the item survives the
+  drop attempt in Hive. Offline Mode strips every `SCOPES` row from a stored offline session
+  before it uploads when that session's own auth answer carries no `scope_discovery` key at
+  all (key absence, not the value `false`, is the strip's own gate), rewriting the stored file
+  before any chunk goes out so a partial upload's retained rows are exactly the ones never
+  sent. Offline Mode itself never asks in the first place: the app's own asking gate excludes
+  Offline Mode outright, so no `SCOPES` item is ever created while offline; the strip exists
+  only for a session recorded before a switch was flipped, or a stray file from an older build.
+
+- **The SCOPES item** (`ApiQueueItem.fromScopes`, Hive field 21 `scopes`): `{type: "SCOPES",
+  public_key, scopes, timestamp, lat, lon}` plus `radio_freq` when the radio reported one.
+  `public_key` is the answering repeater's full key, normalized to 64 upper-case hex (a key
+  that will not normalize throws rather than queuing a broken item; `enqueueScopes` validates
+  first and never reaches that throw). `scopes` is the names exactly as the repeater sent them,
+  case kept, `*` kept, at most 33, empty valid. `lat`/`lon` are where the DISCOVERY that found
+  the repeater was made, not where the answer arrived; `timestamp` is when the answer arrived.
+  Never `external_antenna`, `noisefloor`, `altitude` or `power`, and never stamped with the
+  running auto mode, the same shape as `DEFER`. Logged under `[SCOPES]`.
+
 ### API Queue System
 
 Three data flows (TX pings, RX observations, Discovery results) merge into unified API batch queue:
 
 - **Storage**: Hive-based persistent queue survives app restarts
 - **Batch Size**: Max 50 messages, auto-flush at 10 items or 30 seconds
-- **Payload Format**: `[{type:"TX"|"RX"|"DISC"|"TRACE", ...}]`. TX/RX include `heard_repeats`; DISC includes `repeater_id`, `node_type`, `local_snr`, `local_rssi`, `remote_snr`, `public_key`; TRACE includes `repeater_id`, `local_snr`, `local_rssi`, `remote_snr`. Every type also carries `altitude` (whole meters, omitted when the phone did not know it; iOS reports height above mean sea level; Android usually reports height above the WGS84 ellipsoid, but Android 14+ substitutes mean sea level when the fix carries it, so one device can report either. The two references differ by the local geoid separation, up to ~100 m)
+- **Payload Format**: `[{type:"TX"|"RX"|"DISC"|"TRACE"|"SCOPES", ...}]`. TX/RX include `heard_repeats`; DISC includes `repeater_id`, `node_type`, `local_snr`, `local_rssi`, `remote_snr`, `public_key`; TRACE includes `repeater_id`, `local_snr`, `local_rssi`, `remote_snr`; SCOPES carries only `public_key` and `scopes` (see Scope Discovery), none of `external_antenna`, `noisefloor`, `altitude` or `power`. Every other type also carries `altitude` (whole meters, omitted when the phone did not know it; iOS reports height above mean sea level; Android usually reports height above the WGS84 ellipsoid, but Android 14+ substitutes mean sea level when the fix carries it, so one device can report either. The two references differ by the local geoid separation, up to ~100 m)
 - **Radio preset stamp**: every item (TX, RX, DISC, TRACE and DEFER) carries `radio_freq`, the
   radio's configuration tag `freqMHz,bwKHz,SF,CR` as reported at connect (`ApiQueueItem` Hive
   field 20, read at enqueue time through `ApiQueueService.radioConfigGetter`, wired to the live
@@ -1990,6 +2187,7 @@ debugError('[API] Failed to post batch: $error');
 | `[MODEL]` | Device model identification and power reporting |
 | `[MAP]` | Map widget operations |
 | `[DISC]` | Discovery ping operations |
+| `[SCOPES]` | Scope discovery: the gate, the radio lease, the runner, the log entry |
 | `[MAINTENANCE]` | Maintenance mode handling |
 | `[RX FILTER]` | RX packet validation and carpeater filtering |
 | `[AUDIO]` | Audio/sound notification operations |
@@ -2170,6 +2368,14 @@ All API endpoints may return maintenance mode:
 - `lib/services/meshcore/unified_rx_handler.dart` - Packet routing (TX vs RX)
 - `lib/services/meshcore/tx_tracker.dart` - Repeater echo detection (7s window)
 - `lib/services/meshcore/disc_tracker.dart` - Discovery response tracking (7s window)
+- `lib/services/scope_discovery/scope_regions_codec.dart` - Repeater scope reply codec: builds the regions request, parses the byte-faithful reply, the server's token rule
+- `lib/services/meshcore/scope_lease.dart` - The short radio lease a scope request borrows: admission, the write gate, the hold cap, the request/restore frames
+- `lib/services/scope_discovery/scope_discovery_rules.dart` - The due rule, the phone-side answer cache, the per-device-hour upload budget
+- `lib/services/scope_discovery/scope_runner.dart` - One discovery sweep's scope runner: choosing repeaters, the answer wait, the hard stop, persistence
+- `lib/services/scope_discovery/scope_lifecycle.dart` - The scope discovery gate and the provider's lifecycle wiring: stop events, borrowed-route bookkeeping, the connect-time repeater refresh
+- `lib/services/scope_discovery/scope_provider_support.dart` - Pure helpers behind the provider's scope discovery wiring: server info lookup, refresh staleness
+- `lib/models/scope_log_entry.dart` - `ScopeLogEntry` / `ScopeLogOutcome` and the scope log's own capped list store
+- `lib/widgets/scope_discovery_firmware_note.dart` - The firmware-floor note shown under the Scope Discovery switch
 - `lib/services/meshcore/rx_logger.dart` - Passive observation logging
 - `lib/services/transport/companion_transport.dart` - Transport-agnostic interface for companion connections
 - `lib/services/transport/stream_frame_codec.dart` - TCP/USB Serial framing codec
