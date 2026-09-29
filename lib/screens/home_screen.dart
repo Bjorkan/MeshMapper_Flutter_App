@@ -1284,13 +1284,13 @@ class _HomeScreenState extends State<HomeScreen> {
               ),
               const Divider(height: 24),
 
-              // External Antenna
+              // Antenna
               _buildHelpItem(
                 icon: Icons.settings_input_antenna,
                 color: Colors.orange,
-                title: 'External Antenna',
+                title: 'Antenna',
                 description:
-                    'Enable if using an external antenna (ex: mag mount on roof of car). We store this along with pings as external antennas can make a big difference in reception.',
+                    'Choose External when the antenna isn\'t enclosed by metal or anything that blocks radio, for example a roof mount, a handheld, or the radio in your pocket while walking. Choose Internal when it\'s inside a car cabin, a metal box or another enclosure. We store this with every ping because it makes a big difference to reception.',
               ),
 
               // Send Ping button

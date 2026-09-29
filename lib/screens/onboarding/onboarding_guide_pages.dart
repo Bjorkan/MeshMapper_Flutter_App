@@ -472,11 +472,11 @@ Widget buildAntennaPage(BuildContext context) {
     accent: accent,
     children: [
       GuideParagraph(
-        'Set the required External Antenna: Yes / No control on the Map screen for the setup used on that drive.',
+        'Set the required Antenna: Internal / External control on the Map screen for the setup used on that drive.',
       ),
       GuideComparison(
         left: _CompactCard(
-          title: 'Choose No',
+          title: 'Choose Internal',
           icon: Icons.directions_car,
           color: Colors.blueGrey,
           child: Column(
@@ -490,7 +490,7 @@ Widget buildAntennaPage(BuildContext context) {
           ),
         ),
         right: _CompactCard(
-          title: 'Choose Yes',
+          title: 'Choose External',
           icon: Icons.cell_tower,
           color: accent,
           child: Column(
@@ -511,7 +511,7 @@ Widget buildAntennaPage(BuildContext context) {
         color: accent,
       ),
       GuideCallout(
-        text: 'Choose Yes or No on the Map screen before starting a mode.',
+        text: 'Choose Internal or External on the Map screen before starting a mode.',
         icon: Icons.touch_app,
         color: accent,
       ),
@@ -1329,7 +1329,7 @@ Widget buildHelpPage(BuildContext context) {
       GuideSectionLabel('Before you start'),
       GuideBullet('Connect your radio and choose Online or Offline.'),
       GuideBullet(
-          'Set External Antenna to Yes or No. Configure a CARpeater if one travels with you.'),
+          'Set Antenna to Internal or External. Configure a CARpeater if one travels with you.'),
       GuideBullet(
           'On the Map, start Passive Mode for general mapping. Tap the running mode again to stop.'),
       GuideSectionLabel('Need help?'),

@@ -705,7 +705,7 @@ void main() {
     );
 
     await goToPage(tester, 4);
-    expect(find.textContaining('External Antenna: Yes / No'), findsOneWidget);
+    expect(find.textContaining('Antenna: Internal / External'), findsOneWidget);
 
     await goToPage(tester, 9);
     expect(find.text('Legend & Info'), findsOneWidget);

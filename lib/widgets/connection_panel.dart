@@ -76,7 +76,7 @@ class ConnectionPanel extends StatelessWidget {
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Text(
-                  'External Antenna',
+                  'Antenna',
                   style: TextStyle(
                     fontSize: 13,
                     fontWeight: FontWeight.w500,
@@ -106,10 +106,10 @@ class ConnectionPanel extends StatelessWidget {
               children: [
                 _buildSegmentButton(
                   context,
-                  label: 'No',
+                  label: 'Internal',
                   isSelected: isSet && !hasExternal,
                   onTap: () {
-                    debugLog('[UI] External antenna button pressed: No');
+                    debugLog('[UI] Antenna button pressed: Internal');
                     appState.updatePreferences(
                       prefs.copyWith(
                           externalAntenna: false, externalAntennaSet: true),
@@ -118,10 +118,10 @@ class ConnectionPanel extends StatelessWidget {
                 ),
                 _buildSegmentButton(
                   context,
-                  label: 'Yes',
+                  label: 'External',
                   isSelected: isSet && hasExternal,
                   onTap: () {
-                    debugLog('[UI] External antenna button pressed: Yes');
+                    debugLog('[UI] Antenna button pressed: External');
                     appState.updatePreferences(
                       prefs.copyWith(
                           externalAntenna: true, externalAntennaSet: true),
