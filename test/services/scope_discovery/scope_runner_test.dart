@@ -647,34 +647,60 @@ void main() {
       });
     });
 
-    test('a first miss holds for 15 minutes: not re-asked one second short, '
-        'asked again exactly at the deadline', () {
+    test('a first miss holds for 1 minute: not re-asked one second short, '
+        'asked again exactly at the deadline when heard stronger', () {
       _run((async, h) {
         _start(async, h.build(), [_cand(0x11)]);
         async.elapse(const Duration(seconds: 10));
         final heldUntil = h.cache.heldUntil(_key(0x11));
         expect(heldUntil, isNotNull);
 
-        // One second short of the deadline: still held. A held sweep
-        // resolves on microtasks alone (nothing to ask), so this must not
-        // itself advance the clock any further than the boundary being
-        // tested.
+        // One second short of the deadline: still held, however strong. A
+        // held sweep resolves on microtasks alone (nothing to ask), so this
+        // must not itself advance the clock any further than the boundary
+        // being tested.
         async.elapse(Duration(seconds: heldUntil! - h.nowSec() - 1));
-        _start(async, h.build(token: ScopeCancelToken()), [_cand(0x11)]);
+        _start(async, h.build(token: ScopeCancelToken()),
+            [_cand(0x11, rssi: -50)]);
         expect(h.radio.asks, hasLength(1),
-            reason: 'one second short of the 15 minute deadline');
+            reason: 'one second short of the 1 minute deadline');
 
-        // The deadline itself: due again.
+        // The deadline itself, heard 1 dB stronger: due again.
         async.elapse(const Duration(seconds: 1));
         expect(h.nowSec(), heldUntil);
-        _start(async, h.build(token: ScopeCancelToken()), [_cand(0x11)]);
+        _start(async, h.build(token: ScopeCancelToken()),
+            [_cand(0x11, rssi: -79)]);
         async.elapse(const Duration(seconds: 5));
         expect(h.radio.asks, hasLength(2),
-            reason: 'exactly at the 15 minute deadline: due again');
+            reason: 'at the deadline and 1 dB stronger: due again');
       });
     });
 
-    test('a second consecutive miss doubles the hold to 30 minutes', () {
+    test('after the hold, a repeater heard no stronger waits out the full '
+        '30 minutes from the miss', () {
+      _run((async, h) {
+        _start(async, h.build(), [_cand(0x11)]);
+        async.elapse(const Duration(seconds: 10));
+        final missAt = h.nowSec();
+        final heldUntil = h.cache.heldUntil(_key(0x11))!;
+
+        async.elapse(Duration(seconds: heldUntil - h.nowSec()));
+        _start(async, h.build(token: ScopeCancelToken()),
+            [_cand(0x11, rssi: -80)]);
+        expect(h.radio.asks, hasLength(1),
+            reason: 'no stronger: not worth another ask yet');
+
+        // missAt is when the timeout landed; the hold was stamped a moment
+        // before that, so this is at or just past 30 minutes from the miss.
+        async.elapse(Duration(seconds: missAt + 30 * 60 - h.nowSec()));
+        _start(async, h.build(token: ScopeCancelToken()), [_cand(0x11)]);
+        async.elapse(const Duration(seconds: 5));
+        expect(h.radio.asks, hasLength(2),
+            reason: '30 minutes after the miss the signal rule lapses');
+      });
+    });
+
+    test('a second consecutive miss holds for 5 minutes', () {
       _run((async, h) {
         _start(async, h.build(), [_cand(0x11)]);
         async.elapse(const Duration(seconds: 10));
@@ -682,18 +708,18 @@ void main() {
 
         // Wait out the first hold exactly, then miss again.
         async.elapse(Duration(seconds: firstHeldUntil - h.nowSec()));
-        _start(async, h.build(token: ScopeCancelToken()), [_cand(0x11)]);
+        _start(async, h.build(token: ScopeCancelToken()),
+            [_cand(0x11, rssi: -70)]);
         async.elapse(const Duration(seconds: 10));
         final secondHeldUntil = h.cache.heldUntil(_key(0x11))!;
         expect(h.radio.asks, hasLength(2));
         // Both asks take the same fixed lease + answer-wait time to miss, so
-        // the gap between the two deadlines is ~30 minutes if the second
-        // hold doubled, ~15 minutes if it did not.
+        // the gap between the two deadlines is ~5 minutes if the second
+        // hold stepped up, ~1 minute if it did not.
         final gap = secondHeldUntil - firstHeldUntil;
-        expect(gap, greaterThan(25 * 60),
-            reason: 'the second hold must be the doubled 30 minutes, not '
-                'another 15');
-        expect(gap, lessThan(35 * 60));
+        expect(gap, greaterThan(4 * 60),
+            reason: 'the second hold must be 5 minutes, not another 1');
+        expect(gap, lessThan(6 * 60));
       });
     });
 
@@ -704,11 +730,12 @@ void main() {
         async.elapse(const Duration(seconds: 10));
         expect(h.cache.heldUntil(_key(0x11)), isNotNull);
 
-        // Wait out the hold, then let the second ask answer.
+        // Wait out the hold, then let the second, stronger ask answer.
         final heldUntil = h.cache.heldUntil(_key(0x11))!;
         async.elapse(Duration(seconds: heldUntil - h.nowSec()));
         h.radio.scripts[_key(0x11)] = _Script.answers('Ottawa');
-        _start(async, h.build(token: ScopeCancelToken()), [_cand(0x11)]);
+        _start(async, h.build(token: ScopeCancelToken()),
+            [_cand(0x11, rssi: -70)]);
         async.elapse(const Duration(seconds: 10));
         expect(h.cache[_key(0x11)], isNotNull);
         expect(h.cache.heldUntil(_key(0x11)), isNull,

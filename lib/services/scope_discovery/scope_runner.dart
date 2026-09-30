@@ -311,6 +311,7 @@ class ScopeRunner {
     final cannotAskNonContacts = _cannotAskNonContacts();
     final due = <ScopeCandidate>[];
     var heldCount = 0;
+    var weakCount = 0;
     var blockedCount = 0;
     for (final c in found) {
       final key = normalizePublicKey(c.keyHex);
@@ -324,7 +325,17 @@ class ScopeRunner {
       }
       final info = _serverInfo(key);
       final heldUntil = _cache.heldUntil(key);
-      if (heldUntil != null && nowSec < heldUntil) heldCount++;
+      if (heldUntil != null && nowSec < heldUntil) {
+        heldCount++;
+        continue;
+      }
+      // The hold has run out, but a repeater that missed is only worth
+      // asking again once it is heard clearly better than at the miss.
+      if (_cache.awaitingStrongerSignal(key,
+          nowSec: nowSec, rssi: c.localRssi)) {
+        weakCount++;
+        continue;
+      }
       if (isScopeQueryDue(
           onServerList: info.onList,
           serverCheckedAt: info.checkedAt,
@@ -345,7 +356,7 @@ class ScopeRunner {
     });
     final chosen = due.take(maxAsksPerSweep).toList();
     debugLog('[SCOPES] Sweep: found ${found.length}, due ${due.length}, '
-        'held $heldCount, blocked $blockedCount, '
+        'held $heldCount, weak $weakCount, blocked $blockedCount, '
         'chosen ${chosen.map((c) => _prefix(c.keyHex)).join(', ')}');
 
     for (final c in chosen) {
@@ -414,7 +425,7 @@ class ScopeRunner {
       case ScopeNoAnswer():
         if (_cancel.isCancelled) return false;
         debugLog('[SCOPES] $label: no response');
-        _cache.recordNoAnswer(key, _nowSec());
+        _cache.recordNoAnswer(key, _nowSec(), rssi: c.localRssi);
         _log(c, key, ScopeLogOutcome.noResponse);
         return true;
       case ScopeFlooded():

@@ -270,36 +270,59 @@ void main() {
       expect(cache.heldUntil(keyA), isNull);
     });
 
-    test('recordNoAnswer holds for 15 minutes on the first miss', () {
+    test('recordNoAnswer holds for 1 minute on the first miss', () {
       final cache = ScopeQueryCache.fromJson(null);
       cache.recordNoAnswer(keyA, now);
-      expect(cache.heldUntil(keyA), now + 15 * 60);
+      expect(cache.heldUntil(keyA), now + 60);
     });
 
-    test('a second consecutive miss doubles the hold to 30 minutes', () {
+    test('consecutive misses hold for 1, 5, 10, 20, then 30 minutes', () {
       final cache = ScopeQueryCache.fromJson(null);
-      cache.recordNoAnswer(keyA, now);
-      cache.recordNoAnswer(keyA, now + 1);
-      expect(cache.heldUntil(keyA), now + 1 + 30 * 60);
-    });
-
-    test('a third consecutive miss holds for 60 minutes', () {
-      final cache = ScopeQueryCache.fromJson(null);
-      cache.recordNoAnswer(keyA, now);
-      cache.recordNoAnswer(keyA, now + 1);
-      cache.recordNoAnswer(keyA, now + 2);
-      expect(cache.heldUntil(keyA), now + 2 + 60 * 60);
-    });
-
-    test('the hold caps at 2 hours and stays there', () {
-      final cache = ScopeQueryCache.fromJson(null);
-      var t = now;
-      // 15, 30, 60, 120 (cap reached), 240->120, 480->120
-      for (var i = 0; i < 6; i++) {
-        cache.recordNoAnswer(keyA, t);
-        t += 1;
+      const expected = [1, 5, 10, 20, 30, 30, 30];
+      for (var i = 0; i < expected.length; i++) {
+        cache.recordNoAnswer(keyA, now + i);
+        expect(cache.heldUntil(keyA), now + i + expected[i] * 60,
+            reason: 'miss #${i + 1}');
       }
-      expect(cache.heldUntil(keyA), (t - 1) + 2 * 3600);
+    });
+
+    test('after a miss, a retry needs a stronger signal until 30 minutes '
+        'have passed', () {
+      final cache = ScopeQueryCache.fromJson(null);
+      cache.recordNoAnswer(keyA, now, rssi: -100);
+      bool weak(int t, int rssi) =>
+          cache.awaitingStrongerSignal(keyA, nowSec: t, rssi: rssi);
+      expect(weak(now + 60, -100), isTrue, reason: 'same signal');
+      expect(weak(now + 60, -101), isTrue, reason: 'weaker');
+      expect(weak(now + 60, -99), isFalse, reason: '1 dB stronger');
+      expect(weak(now + 30 * 60 - 1, -100), isTrue);
+      expect(weak(now + 30 * 60, -100), isFalse,
+          reason: '30 minutes after the miss the rule lapses');
+    });
+
+    test('the signal rule tracks the latest miss', () {
+      final cache = ScopeQueryCache.fromJson(null);
+      cache.recordNoAnswer(keyA, now, rssi: -100);
+      cache.recordNoAnswer(keyA, now + 60, rssi: -90);
+      expect(cache.awaitingStrongerSignal(keyA, nowSec: now + 400, rssi: -90),
+          isTrue,
+          reason: 'measured against -90, the latest miss');
+      expect(cache.awaitingStrongerSignal(keyA, nowSec: now + 400, rssi: -89),
+          isFalse);
+    });
+
+    test('no signal rule without a miss RSSI, a hold, or after an answer',
+        () {
+      final cache = ScopeQueryCache.fromJson(null);
+      expect(cache.awaitingStrongerSignal(keyA, nowSec: now, rssi: -100),
+          isFalse, reason: 'never missed');
+      cache.recordNoAnswer(keyA, now);
+      expect(cache.awaitingStrongerSignal(keyA, nowSec: now + 60, rssi: -100),
+          isFalse, reason: 'the miss carried no RSSI');
+      cache.recordNoAnswer(keyA, now, rssi: -100);
+      cache.clearHold(keyA);
+      expect(cache.awaitingStrongerSignal(keyA, nowSec: now + 60, rssi: -100),
+          isFalse, reason: 'an answer cleared the hold');
     });
 
     test('an answer clears the hold and resets the miss count', () {
@@ -309,10 +332,10 @@ void main() {
       expect(cache.heldUntil(keyA), isNotNull);
       cache.recordAnswer(keyA, now + 2);
       expect(cache.heldUntil(keyA), isNull);
-      // The miss count reset too: the next miss holds for the base 15
-      // minutes again, not a doubled 60.
+      // The miss count reset too: the next miss holds for the first step's
+      // 1 minute again, not the third step's 10.
       cache.recordNoAnswer(keyA, now + 3);
-      expect(cache.heldUntil(keyA), now + 3 + 15 * 60);
+      expect(cache.heldUntil(keyA), now + 3 + 60);
     });
 
     test('recordNoAnswer on an unrecognized key is a no-op', () {
@@ -344,14 +367,14 @@ void main() {
       expect(cache[keyA], isNull);
     });
 
-    test('clearHold resets the miss count too: the next miss is the base '
-        '15 minutes again', () {
+    test('clearHold resets the miss count too: the next miss is the first '
+        'step again', () {
       final cache = ScopeQueryCache.fromJson(null);
       cache.recordNoAnswer(keyA, now);
       cache.recordNoAnswer(keyA, now + 1);
       cache.clearHold(keyA);
       cache.recordNoAnswer(keyA, now + 2);
-      expect(cache.heldUntil(keyA), now + 2 + 15 * 60);
+      expect(cache.heldUntil(keyA), now + 2 + 60);
     });
 
     test('clearHold on a key with no hold is a no-op', () {

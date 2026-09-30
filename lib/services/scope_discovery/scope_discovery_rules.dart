@@ -78,14 +78,29 @@ class ScopeQueryCache {
   /// runner's job, not this cache's.
   static const int maxPendingPersist = 32;
 
-  /// The hold's starting length, for a repeater's first consecutive miss.
-  static const Duration noAnswerHoldBase = Duration(minutes: 15);
+  /// The hold length for each consecutive miss, in order. A miss past the
+  /// end of this list holds for [noAnswerHoldMax]. The first step is short
+  /// on purpose: a first miss is usually a car at the edge of a repeater's
+  /// range, and by 15 minutes it has driven out of range for good.
+  static const List<Duration> noAnswerHoldSteps = [
+    Duration(minutes: 1),
+    Duration(minutes: 5),
+    Duration(minutes: 10),
+    Duration(minutes: 20),
+  ];
 
   /// The longest a hold ever runs, however many consecutive misses in a
-  /// row: the repeater firmware's shared anonymous-request budget resets
-  /// well inside this, and a longer hold would only cost real coverage for
-  /// no benefit to the budget.
-  static const Duration noAnswerHoldMax = Duration(hours: 2);
+  /// row. Also how long after a miss the stronger-signal rule
+  /// ([strongerSignalMarginDb]) stays in force.
+  static const Duration noAnswerHoldMax = Duration(minutes: 30);
+
+  /// Once a hold has run out, a retry within [noAnswerHoldMax] of the miss
+  /// also needs the repeater heard at least this many dB stronger than it
+  /// was at the miss. Re-asking at the same signal would most likely go
+  /// unanswered again and spend the repeater's shared anonymous-request
+  /// budget (4 per 3 minutes, across every phone) for nothing; a parked
+  /// phone therefore waits out the full [noAnswerHoldMax].
+  static const int strongerSignalMarginDb = 1;
 
   final Map<String, ScopeCacheEntry> _entries;
 
@@ -172,36 +187,59 @@ class ScopeQueryCache {
     return _holds[key]?.heldUntil;
   }
 
+  /// Whether [keyHex], whose hold has run out, is still waiting for a
+  /// stronger signal before it may be asked again: heard at [rssi] now,
+  /// less than [strongerSignalMarginDb] above the RSSI it was heard at when
+  /// it last missed, and still within [noAnswerHoldMax] of that miss. False
+  /// when it has no hold, the miss carried no RSSI, or [keyHex] does not
+  /// normalize. Does not look at [heldUntil]; the caller checks that first.
+  bool awaitingStrongerSignal(String keyHex,
+      {required int nowSec, required int rssi}) {
+    final key = normalizePublicKey(keyHex);
+    if (key == null) return false;
+    final hold = _holds[key];
+    final missRssi = hold?.missRssi;
+    if (hold == null || missRssi == null) return false;
+    if (nowSec - hold.missAt >= noAnswerHoldMax.inSeconds) return false;
+    return rssi < missRssi + strongerSignalMarginDb;
+  }
+
   /// Records that an ask to [keyHex] at [nowSec] got no answer: starts or
   /// extends its hold so this phone does not re-ask (and re-silence) it
   /// before the repeater firmware's shared anonymous-request budget has had
-  /// a chance to recover.
+  /// a chance to recover, or before the phone is heard better than it was.
   ///
-  /// The first miss holds for [noAnswerHoldBase]; each further consecutive
-  /// miss (no answer landing in between) doubles the previous hold, capped
-  /// at [noAnswerHoldMax]. A no-op when [keyHex] does not normalize to a
-  /// full public key.
-  void recordNoAnswer(String keyHex, int nowSec) {
+  /// The [missCount]th consecutive miss (no answer landing in between)
+  /// holds for the matching [noAnswerHoldSteps] entry, then
+  /// [noAnswerHoldMax] past the end of the list. [rssi] is the discovery
+  /// RSSI the repeater was heard at for this ask, kept for
+  /// [awaitingStrongerSignal]. A no-op when [keyHex] does not normalize to
+  /// a full public key.
+  void recordNoAnswer(String keyHex, int nowSec, {int? rssi}) {
     final key = normalizePublicKey(keyHex);
     if (key == null) return;
     final missCount = (_holds[key]?.missCount ?? 0) + 1;
     final holdSec = _holdSecondsFor(missCount);
     final heldUntil = nowSec + holdSec;
-    _holds[key] = _ScopeHold(heldUntil: heldUntil, missCount: missCount);
+    _holds[key] = _ScopeHold(
+        heldUntil: heldUntil,
+        missCount: missCount,
+        missAt: nowSec,
+        missRssi: rssi);
     debugLog('[SCOPES] ${_logPrefix(key)}: held for '
-        '${_describeSeconds(holdSec)} after miss #$missCount');
+        '${_describeSeconds(holdSec)} after miss #$missCount'
+        '${rssi == null ? '' : ' at $rssi dBm, then needs '
+            '${rssi + strongerSignalMarginDb} dBm or better until '
+            '${_describeSeconds(noAnswerHoldMax.inSeconds)} after the miss'}');
   }
 
-  /// The hold length for the [missCount]th consecutive miss: [noAnswerHoldBase]
-  /// doubled each further miss, capped at [noAnswerHoldMax].
+  /// The hold length for the [missCount]th consecutive miss.
   static int _holdSecondsFor(int missCount) {
-    final capSec = noAnswerHoldMax.inSeconds;
-    var sec = noAnswerHoldBase.inSeconds;
-    for (var i = 1; i < missCount; i++) {
-      if (sec >= capSec) return capSec;
-      sec *= 2;
+    final i = missCount - 1;
+    if (i >= 0 && i < noAnswerHoldSteps.length) {
+      return noAnswerHoldSteps[i].inSeconds;
     }
-    return sec > capSec ? capSec : sec;
+    return noAnswerHoldMax.inSeconds;
   }
 
   static String _logPrefix(String keyHex) =>
@@ -253,7 +291,18 @@ class _ScopeHold {
   /// Consecutive misses (no intervening answer) that produced [heldUntil].
   final int missCount;
 
-  const _ScopeHold({required this.heldUntil, required this.missCount});
+  /// When the latest miss happened (Unix seconds).
+  final int missAt;
+
+  /// The discovery RSSI the repeater was heard at for the latest miss, or
+  /// null when the caller did not know it.
+  final int? missRssi;
+
+  const _ScopeHold(
+      {required this.heldUntil,
+      required this.missCount,
+      required this.missAt,
+      this.missRssi});
 }
 
 /// The per-device-hour cap on `SCOPES` uploads: [perHour] per hour of the

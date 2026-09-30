@@ -654,14 +654,21 @@ Off by default until a region turns it on.
   anonymous scope requests per 3 minutes, shared across every phone asking it, not just this
   one. Re-asking a silent repeater on the very next sweep keeps it silent and starves every
   other phone's turn at the same budget, so this one outcome starts a per-phone hold instead of
-  leaving the repeater due again at once. The first miss holds it for 15 minutes
-  (`ScopeQueryCache.noAnswerHoldBase`); each further consecutive miss (no answer landing in
-  between) doubles the previous hold, capped at 2 hours
-  (`ScopeQueryCache.noAnswerHoldMax`). An answer that PARSES clears its hold and its miss count
+  leaving the repeater due again at once. Consecutive misses (no answer landing in between)
+  hold it for 1, 5, 10 and 20 minutes (`ScopeQueryCache.noAnswerHoldSteps`), then 30 minutes
+  each (`ScopeQueryCache.noAnswerHoldMax`). The first step is short because a first miss is
+  usually a car at the edge of the repeater's range, and a longer hold (it used to start at 15
+  minutes and double to 2 hours) meant the car had left that range for good before the retry.
+  Once a hold runs out the retry also needs a stronger signal: until 30 minutes after the miss,
+  the repeater must be heard by the sweep's own discovery at least 1 dB above the RSSI it had at
+  the miss (`strongerSignalMarginDb`, `ScopeQueryCache.awaitingStrongerSignal`), since asking
+  again at the same signal would most likely go unanswered and spend the shared budget for
+  nothing. A parked phone therefore waits the full 30 minutes, and a car closing on the
+  repeater gets another try within about a minute. An answer that PARSES clears its hold and its miss count
   at once (`ScopeQueryCache.clearHold`, called the moment `parseRegionsReply` succeeds), whatever
   happens to it afterward: a failed hourly-budget reservation write or a refused enqueue still
   proved the repeater reachable right then, so neither may leave the miss count in place for the
-  next ask to double from. The durable answer stamp (`recordAnswer`, which clears the hold too,
+  next ask to step up from. The durable answer stamp (`recordAnswer`, which clears the hold too,
   redundant by that point) still waits on a successful persist, since that stamp feeds the OTHER
   cache rule (the due rule above), not this one. Only `ScopeNoAnswer` starts or extends a hold: a
   flood, a radio error, an unreadable reply (never parsed, so never cleared either), a local
@@ -672,7 +679,7 @@ Off by default until a region turns it on.
   `isScopeQueryDue` takes the hold as a plain `heldUntil`/`nowSec` pair so the rule itself stays
   pure; the runner reads it off the cache before choosing candidates and logs one `[SCOPES]` line
   when a hold starts or extends, and the sweep summary line reports how many candidates were
-  held.
+  held and how many were waiting on a stronger signal (`weak`).
 
 - **The repeater list refresh cadence**: the due rule reads the server's own `scopes_checked_at`
   off the repeater list (`AppStateProvider._repeaters`), which the app itself must keep fetching
