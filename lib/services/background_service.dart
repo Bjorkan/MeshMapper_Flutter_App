@@ -35,6 +35,12 @@ class BackgroundServiceManager {
   /// stops anyway. startService() waits this out first.
   static bool _stopPending = false;
 
+  /// Bumped by every [stopService] call, even one that finds nothing running.
+  /// A start that waits for a previous stop captures it first and abandons
+  /// itself when it moved, so a disconnect during a mode switch's wait cannot
+  /// be followed by the waiting start launching an orphan service.
+  static int _stopGeneration = 0;
+
   /// How often [waitUntilStopped] polls, and how long it waits at most.
   static const Duration _stopPollInterval = Duration(milliseconds: 100);
   static const Duration _stopWaitLimit = Duration(seconds: 2);
@@ -141,6 +147,8 @@ class BackgroundServiceManager {
       return;
     }
 
+    final generation = _stopGeneration;
+
     if (!_isInitialized) {
       debugLog('[BACKGROUND] Service not initialized, initializing now');
       await initialize();
@@ -163,6 +171,11 @@ class BackgroundServiceManager {
           defaultTargetPlatform == TargetPlatform.android) {
         await _awaitPendingStop(service, 'previous stop');
       }
+      if (generation != _stopGeneration) {
+        debugLog('[BACKGROUND] Start abandoned: a stop arrived while it '
+            'was waiting');
+        return;
+      }
 
       debugLog('[BACKGROUND] Starting background service ($title)');
 
@@ -171,13 +184,23 @@ class BackgroundServiceManager {
       _service?.invoke('setInitialTitle', {'title': title});
 
       await _service?.startService();
+      if (generation != _stopGeneration) {
+        debugLog('[BACKGROUND] A stop arrived during the start, stopping it');
+        _service?.invoke('stop');
+        _stopPending = true;
+        return;
+      }
       _isRunning = true;
 
       // Update notification with initial stats
       await updateNotification(title: title, body: body);
 
       debugLog('[BACKGROUND] Background service started');
-      unawaited(_verifyStillRunning());
+      unawaited(_verifyStillRunning(
+        generation: generation,
+        title: title,
+        body: body,
+      ));
     } catch (e) {
       debugError('[BACKGROUND] Failed to start service: $e');
     }
@@ -228,23 +251,51 @@ class BackgroundServiceManager {
     }
   }
 
-  /// Diagnostic only: shortly after a start, confirm the service is still up.
-  /// Logs a warning if it is gone; changes no state, so a false reading
-  /// cannot strand a notification.
-  static Future<void> _verifyStillRunning() async {
+  /// Shortly after a start, confirm the service is still up. A stale
+  /// service whose stopSelf() landed after the bounded wait takes the new
+  /// start down with it while [_isRunning] stays true, so a service found
+  /// gone is started once more, unless a stop has arrived since. One retry
+  /// only: the second check just logs.
+  static Future<void> _verifyStillRunning({
+    required int generation,
+    required String title,
+    required String body,
+    bool retried = false,
+  }) async {
     final service = _service;
     if (service == null || defaultTargetPlatform != TargetPlatform.android) {
       return;
     }
     await Future<void>.delayed(_startVerifyDelay);
-    if (!_isRunning || _stopPending) return;
+    if (!_isRunning || _stopPending || generation != _stopGeneration) return;
     try {
-      if (!await service.isRunning()) {
-        debugWarn('[BACKGROUND] Service not running '
-            '${_startVerifyDelay.inMilliseconds} ms after start');
+      if (await service.isRunning()) return;
+      if (!_isRunning || _stopPending || generation != _stopGeneration) return;
+      if (retried) {
+        debugWarn('[BACKGROUND] Service still not running after the retry');
+        return;
       }
+      debugWarn('[BACKGROUND] Service not running '
+          '${_startVerifyDelay.inMilliseconds} ms after start, starting it '
+          'once more');
+      service.invoke('setInitialTitle', {'title': title});
+      await service.startService();
+      if (generation != _stopGeneration) {
+        // A stop landed during the restart: take it down again.
+        debugLog('[BACKGROUND] Stop arrived during the retry, stopping it');
+        service.invoke('stop');
+        _stopPending = true;
+        return;
+      }
+      await updateNotification(title: title, body: body);
+      unawaited(_verifyStillRunning(
+        generation: generation,
+        title: title,
+        body: body,
+        retried: true,
+      ));
     } catch (e) {
-      debugWarn('[BACKGROUND] Post-start isRunning() check failed: $e');
+      debugWarn('[BACKGROUND] Post-start check failed: $e');
     }
   }
 
@@ -252,6 +303,10 @@ class BackgroundServiceManager {
   /// Called when auto-ping mode is disabled or on disconnect.
   static Future<void> stopService() async {
     if (kIsWeb) return;
+
+    // Always, even with nothing running: a start may be waiting out an
+    // earlier stop and must not go ahead after this one.
+    _stopGeneration++;
 
     if (!_isRunning) {
       debugLog('[BACKGROUND] Service not running');
@@ -289,6 +344,17 @@ class BackgroundServiceManager {
 
   /// Check if the background service is running.
   static bool get isRunning => _isRunning;
+
+  /// Install a stand-in service and reset the manager's state, so the start
+  /// and stop paths can be driven without the plugin.
+  @visibleForTesting
+  static void debugInstallService(FlutterBackgroundService? service) {
+    _service = service;
+    _isInitialized = service != null;
+    _isRunning = false;
+    _stopPending = false;
+    _stopGeneration = 0;
+  }
 
   /// Check if the background service is initialized.
   static bool get isInitialized => _isInitialized;

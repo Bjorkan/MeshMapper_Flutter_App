@@ -1,3 +1,6 @@
+import 'package:fake_async/fake_async.dart';
+import 'package:flutter/foundation.dart';
+import 'package:flutter_background_service/flutter_background_service.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:mesh_mapper/services/background_service.dart';
 
@@ -52,4 +55,93 @@ void main() {
       expect(calls, 2);
     });
   });
+  group('BackgroundServiceManager start and stop', () {
+    late _FakeService fake;
+
+    setUp(() {
+      debugDefaultTargetPlatformOverride = TargetPlatform.android;
+      fake = _FakeService();
+      BackgroundServiceManager.debugInstallService(fake);
+    });
+
+    tearDown(() {
+      BackgroundServiceManager.debugInstallService(null);
+      debugDefaultTargetPlatformOverride = null;
+    });
+
+    test('a disconnect during the wait for an old stop cancels the start', () {
+      fakeAsync((async) {
+        // A mode switch: the old mode is running, then stopped.
+        BackgroundServiceManager.startService(title: 'A', body: 'a');
+        async.flushMicrotasks();
+        expect(fake.starts, 1);
+        BackgroundServiceManager.stopService();
+        fake.running = true; // The old service has not gone yet.
+
+        // The new mode's start waits; a disconnect lands meanwhile, with
+        // nothing marked running.
+        BackgroundServiceManager.startService(title: 'B', body: 'b');
+        async.elapse(const Duration(milliseconds: 250));
+        BackgroundServiceManager.stopService();
+        fake.running = false;
+        async.elapse(const Duration(seconds: 5));
+
+        expect(fake.starts, 1, reason: 'no orphan service after teardown');
+        expect(BackgroundServiceManager.isRunning, isFalse);
+      });
+    });
+
+    test('a service taken down by a late stop is started once more', () {
+      fakeAsync((async) {
+        BackgroundServiceManager.startService(title: 'A', body: 'a');
+        async.flushMicrotasks();
+        expect(fake.starts, 1);
+
+        // The stale stopSelf() lands after the start.
+        fake.running = false;
+        fake.stayDown = true;
+        async.elapse(const Duration(seconds: 1));
+        expect(fake.starts, 2, reason: 'one retry');
+
+        async.elapse(const Duration(seconds: 10));
+        expect(fake.starts, 2, reason: 'never more than one retry');
+      });
+    });
+
+    test('a stop before the post-start check prevents the retry', () {
+      fakeAsync((async) {
+        BackgroundServiceManager.startService(title: 'A', body: 'a');
+        async.flushMicrotasks();
+        BackgroundServiceManager.stopService();
+        fake.running = false;
+        async.elapse(const Duration(seconds: 5));
+        expect(fake.starts, 1);
+      });
+    });
+  });
+}
+
+class _FakeService implements FlutterBackgroundService {
+  bool running = false;
+  bool stayDown = false;
+  int starts = 0;
+  final List<String> invoked = [];
+
+  @override
+  Future<bool> startService() async {
+    starts++;
+    running = !stayDown;
+    return true;
+  }
+
+  @override
+  Future<bool> isRunning() async => running;
+
+  @override
+  void invoke(String method, [Map<String, dynamic>? arg]) {
+    invoked.add(method);
+  }
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
 }
