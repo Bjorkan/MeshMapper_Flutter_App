@@ -2249,7 +2249,7 @@ when MeshMapper is disconnected.
 
 ### iOS
 - Requires Info.plist entries: NSBluetoothAlwaysUsageDescription, NSLocationWhenInUseUsageDescription
-- Deployment target: 13.0
+- Deployment target: 15.0 (the minimum Flutter 3.47.5 supports; iOS 13 and 14 devices cannot install the app)
 - Background modes: bluetooth-central, location
 - Uses `flutter_blue_plus` package
 - `CFBundleURLTypes` registers the `meshmapper-auth` scheme (name `net.meshmapper.app.auth`) for the portal sign-in return
