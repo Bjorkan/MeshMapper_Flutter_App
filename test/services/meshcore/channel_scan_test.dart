@@ -35,6 +35,18 @@ class _WriteFails extends _Answer {
   const _WriteFails();
 }
 
+/// The reply is held back, and from then on every reply runs one read
+/// behind: each read gets the answer to the read before it.
+class _Late extends _Answer {
+  const _Late();
+}
+
+/// A reply for [staleIdx] arrives first, then the real answer.
+class _StaleFirst extends _Answer {
+  final int staleIdx;
+  const _StaleFirst(this.staleIdx);
+}
+
 /// A radio whose channel table is [slots]; reads past it answer
 /// ERR_CODE_NOT_FOUND, as the firmware does past MAX_GROUP_CHANNELS.
 /// [faults] lists, per slot index, answers given before the real one.
@@ -46,6 +58,9 @@ class _ChannelRadio extends FakeCompanionTransport {
       : faults = faults ?? {};
 
   final List<int> reads = [];
+
+  /// Replies the radio still owes once a [_Late] answer starts the lag.
+  List<List<int>>? _lagged;
 
   List<Uint8List> get setChannelWrites =>
       writes.where((w) => w.first == CommandCodes.setChannel).toList();
@@ -68,20 +83,41 @@ class _ChannelRadio extends FakeCompanionTransport {
       throw StateError('GATT write failed');
     }
     await super.write(data);
+    final lagged = _lagged;
+    if (answer is _Late) {
+      _lagged = [_frameFor(idx, idx < slots.length ? slots[idx] : null)];
+      return;
+    }
+    if (lagged != null) {
+      lagged.add(_frameFor(idx, idx < slots.length ? slots[idx] : null));
+      emit(lagged.removeAt(0));
+      return;
+    }
     switch (answer) {
-      case _Slot(:final name, :final key):
-        final frame = BufferWriter();
-        frame.writeByte(ResponseCodes.channelInfo);
-        frame.writeByte(idx);
-        frame.writeCString(name, 32);
-        frame.writeBytes(key);
-        emit(frame.toBytes());
+      case _Slot():
+        emit(_frameFor(idx, answer));
       case _Err(:final code):
         emit([ResponseCodes.err, code]);
+      case _StaleFirst(:final staleIdx):
+        emit(_frameFor(staleIdx, slots[staleIdx]));
+        emit(_frameFor(idx, slots[idx]));
       case _Silent():
       case _WriteFails():
+      case _Late():
         break;
     }
+  }
+
+  /// The radio's reply to a read of [idx]: the slot, or ERR_CODE_NOT_FOUND
+  /// past the end of the table.
+  List<int> _frameFor(int idx, _Slot? slot) {
+    if (slot == null) return [ResponseCodes.err, ErrorCodes.notFound];
+    final frame = BufferWriter();
+    frame.writeByte(ResponseCodes.channelInfo);
+    frame.writeByte(idx);
+    frame.writeCString(slot.name, 32);
+    frame.writeBytes(slot.key);
+    return frame.toBytes();
   }
 }
 
@@ -209,6 +245,46 @@ void main() {
     expect(out.result!.channelIndex, 2);
     expect(out.result!.name, 'Wardrive');
     expect(radio.setChannelWrites, isEmpty);
+  });
+
+  test('a late reply after a timeout never shifts the scan onto a used slot',
+      () {
+    // Slot 1 times out and its reply arrives late; from then on every reply
+    // runs one read behind. Taking replies in arrival order would record the
+    // empty slot 3 as slot 4 and create #wardriving over the user's channel.
+    final radio = _ChannelRadio([
+      named('Public'),
+      named('#a'),
+      named('#b'),
+      empty,
+      named('#mine'),
+    ], faults: {
+      1: [const _Late()],
+    });
+    final out = scan(radio);
+    expect(out.error, isNull);
+    expect(out.result!.channelIndex, 3);
+    expect(radio.setChannelWrites, hasLength(1));
+    expect(radio.setChannelWrites.single[1], 3);
+  });
+
+  test('a stale reply for another slot is ignored and the right one taken',
+      () {
+    final radio = _ChannelRadio([named('Public'), named('#a'), empty],
+        faults: {
+          2: [const _StaleFirst(1)],
+        });
+    ChannelInfo? result;
+    fakeAsync((async) {
+      final connection = MeshCoreConnection(transport: radio);
+      connection.getChannel(2).then<void>((value) => result = value);
+      async.elapse(const Duration(seconds: 1));
+      connection.dispose();
+    });
+    radio.dispose();
+    expect(result, isNotNull);
+    expect(result!.channelIndex, 2);
+    expect(result!.name, '');
   });
 
   test('the typed command error still reads as before in logs', () {

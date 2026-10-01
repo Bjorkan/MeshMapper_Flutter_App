@@ -549,6 +549,10 @@ class MeshCoreConnection {
   Completer<SelfInfo>? _selfInfoCompleter;
   Completer<void>? _setTimeCompleter;
   Completer<ChannelInfo>? _channelInfoCompleter;
+
+  /// The slot [_channelInfoCompleter] asked for. A CHANNEL_INFO for any other
+  /// slot is a late reply to an earlier read and is not this request's answer.
+  int? _channelInfoRequestedIdx;
   Completer<int>? _statsCompleter;
   Completer<String>? _exportContactCompleter;
   Completer<int>? _getTimeCompleter;
@@ -1921,8 +1925,22 @@ class MeshCoreConnection {
 
   void _onChannelInfoResponse(BufferReader reader) {
     final info = ChannelInfo.fromReader(reader);
-    _channelInfoCompleter?.complete(info);
+    final completer = _channelInfoCompleter;
+    if (completer == null) {
+      debugLog('[CONN] Ignoring unrequested CHANNEL_INFO for slot '
+          '${info.channelIndex}');
+      return;
+    }
+    if (info.channelIndex != _channelInfoRequestedIdx) {
+      // A late reply to a read that already timed out. Taking it would put
+      // every later answer one slot behind its request.
+      debugLog('[CONN] Ignoring CHANNEL_INFO for slot ${info.channelIndex} '
+          'while waiting for slot $_channelInfoRequestedIdx');
+      return;
+    }
+    completer.complete(info);
     _channelInfoCompleter = null;
+    _channelInfoRequestedIdx = null;
   }
 
   void _onRawDataPush(BufferReader reader) {
@@ -2623,6 +2641,7 @@ class MeshCoreConnection {
   Future<ChannelInfo> getChannel(int channelIdx) async {
     debugLog('[CONN] getChannel($channelIdx) - sending request');
     _channelInfoCompleter = Completer<ChannelInfo>();
+    _channelInfoRequestedIdx = channelIdx;
 
     // Save reference to future BEFORE writing command to avoid race condition
     // where response arrives and nulls completer before we can access the future

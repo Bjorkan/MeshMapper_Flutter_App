@@ -181,7 +181,9 @@ class ChannelService {
       }
 
       if (channel.name.isEmpty && firstEmptySlot == null) {
-        firstEmptySlot = channelIdx;
+        // The reply's own index, never the loop counter: it is the slot the
+        // radio actually described.
+        firstEmptySlot = channel.channelIndex;
         debugLog('[CHANNEL] Found empty slot at index $firstEmptySlot');
         // Keep scanning: an orphaned #wardriving left by an unexpected
         // disconnect may sit further down, and must not be duplicated.
@@ -220,7 +222,10 @@ class ChannelService {
       MeshCoreConnection connection, int channelIdx) async {
     for (var attempt = 1; attempt <= 2; attempt++) {
       try {
-        return await connection.getChannel(channelIdx);
+        final channel = await connection.getChannel(channelIdx);
+        if (channel.channelIndex == channelIdx) return channel;
+        debugWarn('[CHANNEL] Slot $channelIdx read answered for slot '
+            '${channel.channelIndex} (attempt $attempt)');
       } on CommandErrorException catch (e) {
         if (e.isNotFound) return null;
         debugWarn('[CHANNEL] Slot $channelIdx read failed (attempt $attempt): $e');
