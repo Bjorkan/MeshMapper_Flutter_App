@@ -7382,6 +7382,8 @@ class AppStateProvider extends ChangeNotifier with WidgetsBindingObserver {
       return const RepeaterAdminResult.failed(RepeaterAdminFailureKind.invalid,
           message: 'Something went wrong talking to the radio.');
     }
+    final lapsed = await _repeaterAdminSessionCheck('claim');
+    if (lapsed != null) return lapsed;
     final result = await _repeaterAdminApi.claim(session.target.hexId, proof);
     if (result.ok) {
       debugLog('[RADMIN] Claimed ${session.target.shortId}: '
@@ -7399,6 +7401,8 @@ class AppStateProvider extends ChangeNotifier with WidgetsBindingObserver {
       return const RepeaterAdminResult.failed(
           RepeaterAdminFailureKind.noSession);
     }
+    final lapsed = await _repeaterAdminSessionCheck('unclaim');
+    if (lapsed != null) return lapsed;
     final result = await RepeaterClaimUnclaim(
       request: _repeaterAdminApi.unclaim,
       companionPublicKey: () => _devicePublicKey,
@@ -7436,6 +7440,8 @@ class AppStateProvider extends ChangeNotifier with WidgetsBindingObserver {
       return const RepeaterAdminResult.failed(RepeaterAdminFailureKind.invalid,
           message: 'Something went wrong talking to the radio.');
     }
+    final lapsed = await _repeaterAdminSessionCheck('neighbours');
+    if (lapsed != null) return lapsed;
     final result =
         await _repeaterAdminApi.neighbours(session.target.hexId, table);
     if (result.ok) {
@@ -7443,6 +7449,26 @@ class AppStateProvider extends ChangeNotifier with WidgetsBindingObserver {
           'resolved=${result.resolved} unresolved=${result.unresolved}');
     }
     return result;
+  }
+
+  /// The /repeater door reports an expired session but never recovers it,
+  /// and an idle app's keepalive stops once the session lapses. So run the
+  /// same session check a Start or manual ping runs first
+  /// ([ApiService.checkSessionValid]), which recovers a lapsed session and
+  /// restarts its keepalive. Callers have already refused Offline Mode.
+  /// Returns null when the request may go ahead.
+  Future<RepeaterAdminResult?> _repeaterAdminSessionCheck(String action) async {
+    final pos = _gpsService.lastPosition;
+    final check = await _apiService.checkSessionValid(
+      lat: pos?.latitude,
+      lon: pos?.longitude,
+    );
+    if (check.isValid) return null;
+    debugWarn('[RADMIN] Session check failed before $action '
+        '(${check.reason}), not sending');
+    return RepeaterAdminResult.failed(check.reason == 'no_response'
+        ? RepeaterAdminFailureKind.network
+        : RepeaterAdminFailureKind.sessionExpired);
   }
 
   Future<String?> readRepeaterPassword(String hex) =>

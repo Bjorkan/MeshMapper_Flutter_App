@@ -1574,6 +1574,10 @@ class ApiService {
     _heartbeatInFlight = true;
     _lastHeartbeatSentAt = now;
 
+    // The session this keepalive speaks for. A manual action can recover to a
+    // replacement session while this send is still in flight, and the late
+    // answer about the old one must not cancel or retry the new one's lane.
+    final sentSessionId = _sessionId;
     Map<String, dynamic>? result;
     try {
       // Get GPS coordinates from provider (matching wardrive.js behavior)
@@ -1581,6 +1585,12 @@ class ApiService {
       result = await sendHeartbeat(lat: coords?.lat, lon: coords?.lon);
     } finally {
       _heartbeatInFlight = false;
+    }
+
+    if (result?['success'] != true && _sessionId != sentSessionId) {
+      debugLog('[HEARTBEAT] Ignoring a failed keepalive for a session that '
+          'has since been replaced');
+      return;
     }
 
     if (result?['success'] == true) {
