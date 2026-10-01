@@ -171,6 +171,21 @@ class RadioErrorException implements Exception {
   String toString() => 'RadioErrorException($command, code $errorCode)';
 }
 
+/// Thrown into a pending query (stats, channel info, device query, export
+/// contact, get time) when the radio answers ERR. Carries the firmware's
+/// error code so a caller can tell the end of a list (ERR_CODE_NOT_FOUND)
+/// from a fault, and reads in logs exactly as the plain exception it replaced.
+class CommandErrorException implements Exception {
+  final int errorCode; // ErrorCodes.*
+
+  const CommandErrorException(this.errorCode);
+
+  bool get isNotFound => errorCode == ErrorCodes.notFound;
+
+  @override
+  String toString() => 'Exception: Command error (code $errorCode)';
+}
+
 /// Thrown into every pending repeater-admin completer when the connection
 /// closes mid-command (the `_abortPendingSign` pattern).
 class RadioAbortedException implements Exception {
@@ -927,7 +942,15 @@ class MeshCoreConnection {
     _abortPendingAdmin();
     final channel = _wardrivingChannel;
     if (channel != null) {
-      await ChannelService.deleteWardrivingChannel(this, channel.channelIndex);
+      if (channel.name == ChannelService.wardrivingChannelName) {
+        await ChannelService.deleteWardrivingChannel(
+            this, channel.channelIndex);
+      } else {
+        // A channel the user saved under their own name with the #wardriving
+        // key was reused, not created, so it stays on the radio.
+        debugLog('[CHANNEL] Keeping reused channel "${channel.name}" at '
+            'index ${channel.channelIndex} (not created by MeshMapper)');
+      }
       _wardrivingChannel = null;
     }
   }
@@ -1115,7 +1138,7 @@ class MeshCoreConnection {
                 _adminCommandInFlight?.name ?? 'admin', errorCode));
           }
           // Complete any pending completers with error
-          final errException = Exception('Command error (code $errorCode)');
+          final errException = CommandErrorException(errorCode);
           _statsCompleter?.completeError(errException);
           _statsCompleter = null;
           _channelInfoCompleter?.completeError(errException);

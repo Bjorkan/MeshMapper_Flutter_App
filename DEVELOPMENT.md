@@ -330,7 +330,7 @@ Critical safety: The connection sequence MUST complete in order.
 4. **Device Identification**: Resolve the queried manufacturer against the current server-managed catalog. With nothing cached, this connect may arm one more refresh and waits at most 3 s for it. Recognition is advisory and never modifies radio settings.
 5. **Time Sync**: `sendTime()` syncs device clock
 6. **Session Acquisition**: POST to `/wardrive-api.php/auth` for geo-auth session. Two-stage flow: first attempt with device public key, fallback to registration with signed contact URI if device not registered. Returns `session_id`, `tx_allowed`, `rx_allowed`, `expires_at`, and regional channels.
-7. **Channel Setup**: Create or use existing `#wardriving` channel, plus any regional channels from auth response
+7. **Channel Setup**: Create or use existing `#wardriving` channel, plus any regional channels from auth response. The slot scan ends only on the radio's end-of-list answer (ERR code 2); a slot that fails any other way is read once more, and a second failure fails the connect with a "please reconnect" message rather than creating a channel after an incomplete scan, which used to put a second `#wardriving` on the radio. A slot holding the `#wardriving` key under another name is used as the channel, never renamed and never deleted on disconnect.
 8. **GPS Init**: Acquire GPS lock
 9. **Connected State**: Ready for wardriving — Unified RX Handler starts processing ALL incoming packets, noise floor polling begins (5s interval)
 
