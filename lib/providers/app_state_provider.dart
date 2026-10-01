@@ -44,6 +44,7 @@ import '../services/transport/tcp_service.dart';
 import '../services/device_model_service.dart';
 import '../services/gps_service.dart';
 import '../services/gps_simulator_service.dart';
+import '../services/idle_session.dart';
 import '../services/link_decision.dart';
 import '../services/meshcore/channel_service.dart';
 import '../services/meshcore/connection.dart';
@@ -3400,6 +3401,19 @@ class AppStateProvider extends ChangeNotifier with WidgetsBindingObserver {
     };
 
     _apiService.onSessionExpiredRecovery = _recoverExpiredLiveSession;
+
+    // A keepalive that finds the session expired while nothing is running
+    // lets it lapse instead of minting one that would never see a ping. The
+    // next Start or manual ping re-mints it through its own session check.
+    _apiService.isSessionIdle = () => sessionIsIdle(
+          autoPingEnabled: _autoPingEnabled,
+          autoPingStarting: _autoPingStarting,
+          pendingDisable: isPendingDisable,
+          pingSending: _isPingSending,
+          pingInProgress: isPingInProgress,
+          repeaterAdminOpen: _repeaterAdminSession != null,
+          queuedItems: _apiQueueService.queueSize,
+        );
 
     // A live /auth answer (a session recovery included) can withdraw scope
     // discovery while a lease is mid-exchange; the runner must stop before

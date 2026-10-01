@@ -1623,6 +1623,26 @@ class ApiService {
         'zone_disabled',
       };
 
+      // An idle app (no mode running or stopping, no ping in flight, nothing
+      // queued) has no use for a fresh session. This is the Android case
+      // where a stopped mode lets the process freeze in the background, the
+      // keepalive never fires, and the overdue one comes back expired on
+      // resume: recovering here minted a session that never saw a ping. Stop
+      // the keepalive instead and leave the session lapsed. The next Start or
+      // manual ping runs checkSessionValid, which posts its own heartbeat,
+      // gets the same session_expired and recovers there. The enabled flag is
+      // kept so that recovery reschedules the keepalive for the new session.
+      if (reason == 'session_expired' && (isSessionIdle?.call() ?? false)) {
+        debugLog('[HEARTBEAT] Session lapsed while idle, stopping the '
+            'keepalive; the next ping or mode start will refresh it');
+        _heartbeatTimer?.cancel();
+        _heartbeatTimer = null;
+        _heartbeatRetryTimer?.cancel();
+        _heartbeatRetryTimer = null;
+        _heartbeatRetryCount = 0;
+        return;
+      }
+
       final recovery =
           reason == 'session_expired' ? await _recoverExpiredSession() : null;
       if (recovery == SessionRecoveryResult.recovered) {
@@ -1695,6 +1715,13 @@ class ApiService {
   /// one recoverable session error. The provider owns the auth payload and
   /// decides whether its connection state still permits recovery.
   Future<SessionRecoveryResult> Function()? onSessionExpiredRecovery;
+
+  /// True when nothing would use a refreshed session right now: no auto mode
+  /// running or stopping, no ping in flight, nothing queued for upload. Read
+  /// only by the scheduled keepalive, which then lets an expired session lapse
+  /// instead of re-minting one (see [_sendScheduledHeartbeat]). Every action
+  /// path still recovers through [checkSessionValid] or the upload door.
+  bool Function()? isSessionIdle;
 
   /// Callback for session errors (session_expired, bad_session, outside_zone)
   /// Set by AppStateProvider to handle auto-disconnect
