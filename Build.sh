@@ -5,6 +5,11 @@
 
 set -e  # Exit on any error
 
+# The Flutter SDK every release is built with. Bump this when Flutter is
+# upgraded, together with flutter-version in .github/workflows/ci.yml, so the
+# store builds and CI never drift onto different SDKs.
+REQUIRED_FLUTTER_VERSION="3.47.5"
+
 # CLI flags for scripted use: ./Build.sh [--type dev|prod] [--version X.Y.Z] [--dry-run]
 # With no flags the script behaves exactly as before (interactive prompts).
 CLI_TYPE=""
@@ -231,6 +236,14 @@ if [ -z "$FLUTTER_BIN" ]; then
     exit 1
 fi
 FLUTTER_VERSION_LINE="$(flutter --version 2>/dev/null | head -1)"
+FLUTTER_FRAMEWORK_VERSION="$(flutter --version --machine 2>/dev/null | sed -n 's/.*"frameworkVersion": *"\([^"]*\)".*/\1/p' | head -1)"
+if [ "$FLUTTER_FRAMEWORK_VERSION" != "$REQUIRED_FLUTTER_VERSION" ]; then
+    echo "Error: Flutter $REQUIRED_FLUTTER_VERSION is required, but the flutter on PATH"
+    echo "($FLUTTER_BIN) is ${FLUTTER_FRAMEWORK_VERSION:-unknown}."
+    echo "Install or switch to $REQUIRED_FLUTTER_VERSION, or bump REQUIRED_FLUTTER_VERSION"
+    echo "at the top of Build.sh (and ci.yml) if you are upgrading on purpose."
+    exit 1
+fi
 
 # Dry run: everything is resolved and validated - print the plan and stop
 if [ "$DRY_RUN" = "1" ]; then
