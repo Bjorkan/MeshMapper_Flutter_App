@@ -48,7 +48,7 @@ class MapSettingsPage extends StatelessWidget {
               title: const Text('Use Downloaded Tiles Only'),
               subtitle: Text(prefs.mapTilesEnabled
                   ? 'Online tiles load normally'
-                  : 'Only downloaded areas are shown · no network tile requests'),
+                  : 'Only downloaded areas are shown. The coverage overlay is hidden.'),
               value: !prefs.mapTilesEnabled,
               onChanged: (value) {
                 appState
@@ -57,6 +57,11 @@ class MapSettingsPage extends StatelessWidget {
             ),
           ]),
           SettingsSectionCard(title: 'Coverage Overlay', children: [
+            if (!prefs.mapTilesEnabled)
+              const ListTile(
+                leading: Icon(Icons.layers_clear),
+                subtitle: Text('Hidden while Use Downloaded Tiles Only is on'),
+              ),
             if (prefs.mapTilesEnabled)
               ListTile(
                 leading: const Icon(Icons.opacity),
