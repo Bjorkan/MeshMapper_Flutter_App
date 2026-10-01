@@ -787,17 +787,22 @@ class WardrivingSettingsPage extends StatelessWidget {
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               Text(
-                'After each discovery, MeshMapper asks the repeaters it found which scopes they carry, and adds the answer to the map. Each repeater is asked at most once per interval, by anyone.',
+                'In Passive and Hybrid, after each discovery MeshMapper can ask the repeaters it found which scopes they carry, and adds the answers to the map.',
                 style: TextStyle(fontSize: 14),
               ),
               SizedBox(height: 12),
               Text(
-                'Your radio sends a few short extra messages after each discovery: it asks up to 3 of the strongest repeaters it found, one at a time, and waits a few seconds for each answer. Your pings are not delayed. A small "Scopes" badge shows on the ping button while it is asking, and each request appears in the log under SCP.',
+                'A repeater is only asked when it is due: nobody has checked it within the "Ask repeaters again after" window. Answers from other wardrivers and from the region\'s observers count too, so a repeater someone else already checked is skipped and nothing is sent to it.',
                 style: TextStyle(fontSize: 14),
               ),
               SizedBox(height: 12),
               Text(
-                "It needs companion firmware v1.16.0 or newer, and your region's server must support it.",
+                'When repeaters are due, your radio asks up to 3 of the strongest, one at a time, and waits a few seconds for each answer. Your pings keep their normal schedule. A small "Scopes" badge shows on the ping button while it is asking, and each request appears in the log under SCP.',
+                style: TextStyle(fontSize: 14),
+              ),
+              SizedBox(height: 12),
+              Text(
+                'It needs companion firmware v1.16.0 or newer.',
                 style: TextStyle(fontSize: 14),
               ),
             ],
