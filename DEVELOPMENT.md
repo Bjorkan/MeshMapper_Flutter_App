@@ -62,6 +62,8 @@ delivery races still need a wrist.
 
 ### Building for Release
 ```bash
+# Build.sh regenerates the Hive adapters (build_runner) with the Flutter SDK on PATH
+# before building, and stops if that fails or rewrites pubspec.lock
 # Use Build.sh — prompts for API key and signing passwords
 ./Build.sh
 
