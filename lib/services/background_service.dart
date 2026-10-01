@@ -28,6 +28,20 @@ class BackgroundServiceManager {
   static bool _isInitialized = false;
   static bool _isRunning = false;
 
+  /// True from the moment a 'stop' is sent until the service is seen gone (or
+  /// the bounded wait gives up). 'stop' is fire-and-forget: the service
+  /// isolate answers it with stopSelf() some milliseconds later, and a
+  /// startService() sent in that gap reuses the dying service, which then
+  /// stops anyway. startService() waits this out first.
+  static bool _stopPending = false;
+
+  /// How often [waitUntilStopped] polls, and how long it waits at most.
+  static const Duration _stopPollInterval = Duration(milliseconds: 100);
+  static const Duration _stopWaitLimit = Duration(seconds: 2);
+
+  /// How long after a start to check the service is still up (diagnostic).
+  static const Duration _startVerifyDelay = Duration(seconds: 1);
+
   /// Initialize the background service.
   /// Called lazily on first startService() call — never at app startup.
   /// On Android, configure() may start the foreground service as a side effect
@@ -99,6 +113,10 @@ class BackgroundServiceManager {
         debugLog(
             '[BACKGROUND] Service unexpectedly running after configure(), stopping it');
         _service!.invoke('stop');
+        // Wait for it to actually go. Starting straight away let the stale
+        // service's stopSelf() land after our start and take the new
+        // service down with it, so GPS stopped in the background.
+        await _awaitPendingStop(_service!, 'stale service after configure()');
       }
 
       _isInitialized = true;
@@ -135,6 +153,17 @@ class BackgroundServiceManager {
     }
 
     try {
+      // A stop sent just before (a mode switch stops the old mode's service
+      // and starts the new one within milliseconds) must finish first, or
+      // its stopSelf() kills the service this call is about to start. Android
+      // only: that is where stop and start race on one service instance.
+      final service = _service;
+      if (_stopPending &&
+          service != null &&
+          defaultTargetPlatform == TargetPlatform.android) {
+        await _awaitPendingStop(service, 'previous stop');
+      }
+
       debugLog('[BACKGROUND] Starting background service ($title)');
 
       // Seed the title so the "Starting wardriving..." notification names the
@@ -148,8 +177,74 @@ class BackgroundServiceManager {
       await updateNotification(title: title, body: body);
 
       debugLog('[BACKGROUND] Background service started');
+      unawaited(_verifyStillRunning());
     } catch (e) {
       debugError('[BACKGROUND] Failed to start service: $e');
+    }
+  }
+
+  /// Wait (bounded) for a service that was sent 'stop' to actually stop, and
+  /// log how long it took. Never throws.
+  static Future<void> _awaitPendingStop(
+    FlutterBackgroundService service,
+    String what,
+  ) async {
+    _stopPending = true;
+    final elapsed = await waitUntilStopped(
+      isRunning: service.isRunning,
+      pollInterval: _stopPollInterval,
+      timeout: _stopWaitLimit,
+    );
+    _stopPending = false;
+    if (elapsed == null) {
+      debugWarn('[BACKGROUND] $what still running after '
+          '${_stopWaitLimit.inMilliseconds} ms, starting anyway');
+    } else {
+      debugLog('[BACKGROUND] $what stopped after ${elapsed.inMilliseconds} ms');
+    }
+  }
+
+  /// Poll [isRunning] every [pollInterval] until it reports false, for at most
+  /// [timeout]. Returns how long that took, or null if it was still running
+  /// at the bound. A poll that throws counts as still running.
+  @visibleForTesting
+  static Future<Duration?> waitUntilStopped({
+    required Future<bool> Function() isRunning,
+    Duration pollInterval = _stopPollInterval,
+    Duration timeout = _stopWaitLimit,
+  }) async {
+    final watch = Stopwatch()..start();
+    while (true) {
+      bool running;
+      try {
+        running = await isRunning();
+      } catch (e) {
+        debugWarn('[BACKGROUND] isRunning() check failed: $e');
+        running = true;
+      }
+      if (!running) return watch.elapsed;
+      if (watch.elapsed >= timeout) return null;
+      await Future<void>.delayed(pollInterval);
+    }
+  }
+
+  /// Diagnostic only: shortly after a start, confirm the service is still up.
+  /// Logs a warning if it is gone; changes no state, so a false reading
+  /// cannot strand a notification.
+  static Future<void> _verifyStillRunning() async {
+    final service = _service;
+    if (service == null || defaultTargetPlatform != TargetPlatform.android) {
+      return;
+    }
+    await Future<void>.delayed(_startVerifyDelay);
+    if (!_isRunning || _stopPending) return;
+    try {
+      if (!await service.isRunning()) {
+        debugWarn('[BACKGROUND] Service not running '
+            '${_startVerifyDelay.inMilliseconds} ms after start');
+      }
+    } catch (e) {
+      debugWarn('[BACKGROUND] Post-start isRunning() check failed: $e');
     }
   }
 
@@ -167,6 +262,7 @@ class BackgroundServiceManager {
       debugLog('[BACKGROUND] Stopping background service');
       _service?.invoke('stop');
       _isRunning = false;
+      _stopPending = true;
       debugLog('[BACKGROUND] Background service stopped');
     } catch (e) {
       debugError('[BACKGROUND] Failed to stop service: $e');
