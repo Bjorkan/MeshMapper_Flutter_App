@@ -39,6 +39,13 @@ class GpsService {
   /// trips it too; that is accepted.
   static const double airborneSpeedMetersPerSecond = 250.0 / 3.6;
 
+  /// Airborne block: a fix whose altitude clears [airborneAltitudeMeters]
+  /// only counts when its speed is unknown or at least this (150 km/h).
+  /// Nothing above 6,000 m flies that slowly, so a known slower speed means
+  /// the altitude is the bad reading (an iOS fix once read 18,490 m in a car
+  /// doing 8 km/h).
+  static const double airborneAltitudeMinSpeedMetersPerSecond = 150.0 / 3.6;
+
   /// Consecutive fixes needed to set or clear the airborne latch. One wild
   /// fix is GPS jitter, three in a row is real (same idea as the provider's
   /// idle-anchor streak).
@@ -164,12 +171,23 @@ class GpsService {
   /// Pure gate: does this single fix look like it came from an aircraft?
   ///
   /// The altitude test subtracts the fix's own vertical error first, so a
-  /// shaky reading has to be well clear of the line. Unknown altitude and
-  /// unknown speed arrive as 0.0 and never qualify (fail open).
+  /// shaky reading has to be well clear of the line, and is ignored when the
+  /// fix's own known speed is too slow for anything at that height. Unknown
+  /// altitude and unknown speed arrive as 0.0 and never qualify (fail open).
   static bool positionLooksAirborne(Position position) {
-    final altitudeFloor = position.altitude - position.altitudeAccuracy;
-    return altitudeFloor > airborneAltitudeMeters ||
+    return _altitudeGateFires(position) ||
         position.speed > airborneSpeedMetersPerSecond;
+  }
+
+  /// The altitude half of [positionLooksAirborne], shared with the latch so
+  /// the recorded gate always agrees with the test that let the fix through.
+  /// A known speed under [airborneAltitudeMinSpeedMetersPerSecond]
+  /// contradicts the altitude, so the fix does not qualify on it.
+  static bool _altitudeGateFires(Position position) {
+    final altitudeFloor = position.altitude - position.altitudeAccuracy;
+    if (altitudeFloor <= airborneAltitudeMeters) return false;
+    final speed = speedOrNull(position);
+    return speed == null || speed >= airborneAltitudeMinSpeedMetersPerSecond;
   }
 
   /// Feed one accepted fix into the airborne latch.
@@ -187,8 +205,7 @@ class GpsService {
       _airborneStreak++;
       if (!_airborne && _airborneStreak >= airborneStreakRequired) {
         _airborne = true;
-        final altitudeFloor = position.altitude - position.altitudeAccuracy;
-        _airborneGate = altitudeFloor > airborneAltitudeMeters
+        _airborneGate = _altitudeGateFires(position)
             ? AirborneGate.altitude
             : AirborneGate.speed;
         // Both readings of the latching fix, each null when unknown.
